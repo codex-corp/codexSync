@@ -32,6 +32,7 @@ import lzma
 from pathlib import Path
 import shutil
 from typing import BinaryIO
+import zlib
 
 
 #: Suffix a branch keeps in every container. What precedes it is the logical
@@ -47,12 +48,13 @@ _COPY_CHUNK = 1024 * 1024
 
 #: What reading a branch can raise. A plain file only ever fails with an
 #: ``OSError``, but a container has its own: ``gzip`` raises ``EOFError`` on a
-#: truncated member and ``lzma`` raises ``LZMAError`` on a corrupt one, and
-#: neither is an ``OSError``. A half-written container is the expected
-#: condition in a mirror a cloud client writes on its own schedule, so every
-#: reader catches these together rather than dying with a traceback on a file
-#: that will be complete a second later.
-JSONL_READ_ERRORS: tuple[type[BaseException], ...] = (OSError, EOFError, lzma.LZMAError)
+#: truncated member, ``zlib.error`` on a damaged deflate stream, and ``lzma``
+#: raises ``LZMAError`` on a corrupt one, and none of them is an ``OSError``.
+#: A half-written container is the expected condition in a mirror a cloud
+#: client writes on its own schedule, so every reader catches these together
+#: rather than dying with a traceback on a file that will be complete a second
+#: later.
+JSONL_READ_ERRORS: tuple[type[BaseException], ...] = (OSError, EOFError, lzma.LZMAError, zlib.error)
 
 
 class JsonlCodec(str, Enum):

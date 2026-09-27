@@ -32,6 +32,7 @@ from ..widgets import (
     card,
     command,
     fill_table,
+    human_size,
     label,
     machine_combo,
     row,
@@ -44,7 +45,7 @@ from .base import Model, Screen
 WRITING_KINDS = {"ADD_PROJECT", "REMAP_ROOT", "ADD_BINDING"}
 BLOCKING_KINDS = {"AMBIGUOUS_PROJECT", "UNSUPPORTED_BACKEND"}
 QUIET_KINDS = {"KEEP_PROJECT", "KEEP_BINDING", "SKIP_UNMAPPED"}
-KIND_TONES = {"REMAP_ROOT": "attention", "ADD_BINDING": "ok", "ADD_PROJECT": "ok", "AMBIGUOUS_PROJECT": "danger", "UNSUPPORTED_BACKEND": "danger"}
+KIND_TONES = {"REMAP_ROOT": "attention", "ADD_BINDING": "ok", "ADD_PROJECT": "ok", "SKIP_NO_PROJECT": "attention", "AMBIGUOUS_PROJECT": "danger", "UNSUPPORTED_BACKEND": "danger"}
 
 
 class ProjectsModel(Model):
@@ -277,8 +278,12 @@ class ProjectsScreen(Screen):
         self._render_actions()
 
     def activated(self) -> None:
-        if self.model.directory is None and not self.model.busy:
-            self.refresh()
+        """The screen was just shown; it reads nothing by itself.
+
+        The project list comes from a full chat scan of `.codex`, which raises
+        the safety gate. Arriving is not asking for that (CS-262, CS-309):
+        the refresh button is the request.
+        """
 
     # --- actions -----------------------------------------------------------------------
 
@@ -408,7 +413,7 @@ class ProjectsScreen(Screen):
             self.t(
                 "projects.move.confirm.body",
                 old=plan.old_root, new=plan.new_root, files=plan.file_count,
-                size=_size(plan.total_bytes), chats=len(plan.bindings), plan_id=plan.plan_id,
+                size=human_size(plan.total_bytes), chats=len(plan.bindings), plan_id=plan.plan_id,
             ),
             self.t("projects.move.apply"),
         ):
@@ -464,7 +469,7 @@ class ProjectsScreen(Screen):
             lines = [self.t(
                 "projects.move.summary",
                 old=plan.old_root, new=plan.new_root, files=plan.file_count,
-                size=_size(plan.total_bytes), chats=len(plan.bindings),
+                size=human_size(plan.total_bytes), chats=len(plan.bindings),
             )]
             if plan.copy_complete:
                 lines.append(self.t("projects.move.copy_complete"))
@@ -601,7 +606,7 @@ class ProjectsScreen(Screen):
             f"{self.t(f'repair.kind.{kind}')}: {count}" for kind, count in sorted(counts.items())
         ]) or self.t("projects.repair.empty"))
         names = self._names()
-        order = {"REMAP_ROOT": 0, "ADD_PROJECT": 1, "AMBIGUOUS_PROJECT": 2, "UNSUPPORTED_BACKEND": 3, "ADD_BINDING": 4}
+        order = {"REMAP_ROOT": 0, "ADD_PROJECT": 1, "SKIP_NO_PROJECT": 1, "AMBIGUOUS_PROJECT": 2, "UNSUPPORTED_BACKEND": 3, "ADD_BINDING": 4}
         actions = [a for a in plan.actions if model.show_all or a.kind.value not in QUIET_KINDS]
         actions.sort(key=lambda a: (order.get(a.kind.value, 9), names.get(a.project_id or "", "")))
         rows = []
@@ -660,9 +665,3 @@ class ProjectsScreen(Screen):
         self.status.setText(text)
         set_tone(self.status, tone, palette)
         self.status.setVisible(bool(text))
-
-
-def _size(size: int) -> str:
-    from .guardian import _size as size_text
-
-    return size_text(size)

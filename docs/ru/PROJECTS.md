@@ -57,8 +57,8 @@ codexsync -c config.toml chats list --source-machine desktop --target-machine la
 закрыт:
 
 ```powershell
-codexsync -c config.toml chats move --chat 01a00ab4 --to LabTakt
-codexsync -c config.toml chats move --chat 01a00ab4 --to LabTakt --confirm <plan-id>
+codexsync -c config.toml chats move --chat 3f9c2e71 --to Atlas
+codexsync -c config.toml chats move --chat 3f9c2e71 --to Atlas --confirm <plan-id>
 ```
 
 - Файла плана нет: id покрывает решения *и* точные байты состояния, из которого
@@ -94,7 +94,14 @@ codexsync -c config.toml repair-projects apply --plan repair-plan.json --confirm
   переезда, записали старую папку, и перенос корня из неё сделал бы их
   невидимыми. Поэтому каждая сессия, всё ещё лежащая под старым корнем, тоже
   закрепляется за проектом. Если какой-то такой чат остался бы без привязки,
-  план сообщает `REMAP_ORPHANS_SESSIONS`, и применение отклоняется.
+  план сообщает `REMAP_ORPHANS_SESSIONS`, и применение отклоняется. Чат под
+  старым корнем, который уже принадлежит *другому* проекту (вложенному или тому,
+  куда вы его перенесли), не забирается: план сообщает
+  `REMAP_SESSION_BOUND_ELSEWHERE` и отказывает, пока вы не решите, где ему место.
+- **Чат, чья папка здесь не проект,** показывается как `SKIP_NO_PROJECT` и
+  остаётся как есть. Записи проектов настольной сборки содержат поля, которые
+  codexSync не выдумывает, поэтому проект там он не создаёт никогда: создайте его
+  в Codex и повторите сканирование. Такой чат больше не блокирует остальной план.
 - **Два кандидата**, которые оба отображаются на один новый корень,
   сообщаются как `AMBIGUOUS_PROJECT`, и ничего не применяется.
 - **Внутри файла сессии ничего не правится.** Сырые байты записи — её
@@ -106,7 +113,7 @@ codexsync -c config.toml repair-projects apply --plan repair-plan.json --confirm
 `project-move` сам переносит проект на одной машине:
 
 ```powershell
-codexsync -c config.toml project-move scan --project LabTakt --to D:/Work/labtakt --save-plan move.json
+codexsync -c config.toml project-move scan --project Atlas --to D:/Work/atlas --save-plan move.json
 codexsync -c config.toml project-move apply --plan move.json --confirm-plan <plan-id> --dry-run
 codexsync -c config.toml project-move apply --plan move.json --confirm-plan <plan-id>
 ```

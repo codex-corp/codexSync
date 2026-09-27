@@ -174,6 +174,9 @@ class SyncEngineTests(unittest.TestCase):
                 temp_dir=temp_root,
                 backup_before_overwrite=True,
                 fail_on_unknown=True,
+                # Only an hour-old file is an orphan (CS-325): a younger one
+                # may be a journal another command is writing right now.
+                now=lambda: time.time() + 7200,
             )
 
             engine.execute(SyncPlan(), dry_run=False)

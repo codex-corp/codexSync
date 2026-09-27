@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 import hashlib
 from pathlib import Path
 
@@ -21,6 +22,7 @@ def build_sync_plan(
     equal_mtime_action: str = "skip",
     direction: str = "bidirectional",
     delete_policy: str = "never",
+    include_roots: Sequence[str] = (),
 ) -> SyncPlan:
     """Build the copy plan, with conflict detection.
 
@@ -30,13 +32,23 @@ def build_sync_plan(
     synchronised. ``delete_policy`` decides what a file present on one side
     only means (`D-013`): copy it back, or -- with proof from the previous
     manifest -- remove it here too.
+
+    Two situations are conflicts whatever the policies say (CS-324): paths
+    that differ only in letter case, which a case-insensitive volume stores as
+    one file, and a deletion out of an include root the other side holds
+    nothing of at all -- that is a missing or re-synchronising folder, not a
+    person deleting every file in it.
     """
     tolerance_ns = tolerance_seconds * 1_000_000_000
     plan = SyncPlan()
     all_paths = sorted(set(local_index.keys()) | set(cloud_index.keys()))
     prev_files = previous_manifest.files if previous_manifest else {}
+    case_collisions = _case_collisions(all_paths)
+    plan.conflicts.extend(sorted(case_collisions))
 
     for rel in all_paths:
+        if rel in case_collisions:
+            continue
         local_meta = local_index.get(rel)
         cloud_meta = cloud_index.get(rel)
         prev_entry = prev_files.get(rel)
@@ -110,7 +122,72 @@ def build_sync_plan(
         else:
             plan.to_local.append(CopyAction(cloud_meta.abs_path, local_root / rel, rel))
 
+    _hold_deletions_from_empty_roots(plan, local_index, cloud_index, include_roots)
     return _apply_direction(plan, direction)
+
+
+def _case_collisions(paths: Sequence[str]) -> set[str]:
+    """Paths that another path in the set equals except for letter case.
+
+    NTFS and APFS (by default) keep `Rules/a.md` and `rules/a.md` as one file,
+    so copying both, or one over the other, writes into a file the plan
+    believes is someone else's. Which spelling is right is the user's call.
+    """
+    groups: dict[str, list[str]] = {}
+    for rel in paths:
+        groups.setdefault(rel.casefold(), []).append(rel)
+    return {rel for members in groups.values() if len(members) > 1 for rel in members}
+
+
+def _hold_deletions_from_empty_roots(
+    plan: SyncPlan,
+    local_index: dict[str, FileMeta],
+    cloud_index: dict[str, FileMeta],
+    include_roots: Sequence[str],
+) -> None:
+    """Turn a deletion into a conflict when the side it came from holds nothing there.
+
+    `propagate` reads "missing on one side" as "deleted there". When a whole
+    include root is missing or empty on that side -- a cloud folder being
+    re-downloaded, a disconnected drive, a root that was never created -- that
+    reading would empty the same root on the other side. Nobody deletes a
+    whole root by deleting its files one by one, so the user decides.
+    """
+    if not plan.deletions:
+        return
+    roots = sorted(
+        {_normalise_root(root) for root in include_roots if _normalise_root(root)},
+        key=len,
+        reverse=True,
+    )
+    present = {
+        "local": {_root_of(rel, roots) for rel in local_index},
+        "cloud": {_root_of(rel, roots) for rel in cloud_index},
+    }
+    kept: list[DeleteAction] = []
+    for deletion in plan.deletions:
+        # The file is removed from `side` because it is missing on the other.
+        absent_from = "cloud" if deletion.side == "local" else "local"
+        if _root_of(deletion.relative_path, roots) in present[absent_from]:
+            kept.append(deletion)
+        else:
+            plan.conflicts.append(deletion.relative_path)
+    plan.deletions = kept
+
+
+def _normalise_root(root: str) -> str:
+    value = root.replace("\\", "/").strip().strip("/")
+    while value.startswith("./"):
+        value = value[2:]
+    return "" if value == "." else value
+
+
+def _root_of(rel: str, roots: Sequence[str]) -> str:
+    """The include root ``rel`` belongs to; ``""`` (the whole side) without one."""
+    for root in roots:
+        if rel == root or rel.startswith(root + "/"):
+            return root
+    return ""
 
 
 def _apply_direction(plan: SyncPlan, direction: str) -> SyncPlan:

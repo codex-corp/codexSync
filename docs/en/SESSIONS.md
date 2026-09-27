@@ -20,7 +20,13 @@ the cloud folder and classifies each one:
   the longer one can simply replace it;
 - **active ↔ archive transition** — the same history moved between `sessions/`
   and `archived_sessions/`;
-- **divergence** — both sides added different records.
+- **divergence** — both sides added different records;
+- **a copy that cannot be used** (`BLOCKED_INVALID_BRANCH`) — unreadable,
+  truncated, or one session id in two files (`LOCAL_DUPLICATE_SESSION_ID`,
+  `REMOTE_DUPLICATE_SESSION_ID`), or a copy would land on a file that is not
+  this session's (`DESTINATION_OCCUPIED`). Such a copy is never taken for a
+  missing one: nothing is written for that session on either side until the file
+  reads cleanly, and the other sessions are not held up by it.
 
 ```powershell
 codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --save-plan sessions-plan.json
@@ -35,12 +41,13 @@ thread names or record contents: a conflict is addressed by its id alone.
 A laptop that needs only one project does not have to take every session with it:
 
 ```powershell
-codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --project project-chloya --save-scope --save-plan sessions-plan.json
+codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --project project-orion --save-scope --save-plan sessions-plan.json
 ```
 
 - `--project` and `--chat` may be repeated; `--scope-file` reads a set saved
-  earlier; `--save-scope` remembers this one for the pair of machines in
-  `plans/sessions-scope-<from>-<to>.json`.
+  earlier (a file that is missing or is not a saved set stops the scan with exit
+  code `4` instead of dropping the set); `--save-scope` remembers this one for
+  the pair of machines in `plans/sessions-scope-<from>-<to>.json`.
 - A project means all of its chats — pinned, found by path, or connected by a
   `[[path_mappings]]` rule — and the sub-threads they spawned, including chats
   that appeared on the other machine after the set was chosen.
@@ -51,7 +58,9 @@ codexsync -c config.toml sessions scan --source-machine desktop --target-machine
 
 A session held back is reported as `OUT_OF_SCOPE`. It blocks nothing, and it
 carries what it would have been (`WOULD_BE_…`), so the summary says what is held
-back instead of omitting it.
+back instead of omitting it. A set that covers no session at all — a project
+with no chats yet — writes nothing into `.codex` and is marked
+`WORKING_SET_MATCHES_NOTHING`; the mirror is still written in full.
 
 A chat whose working folder does not exist on this machine — usually a project
 kept outside the synced folder — is marked `CWD_ABSENT_HERE`, and
@@ -73,7 +82,14 @@ codexsync -c config.toml sessions resolve --plan sessions-plan.json --conflict <
 codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --resolutions resolutions.json --save-plan sessions-plan.json
 ```
 
-`--choice` is `KEEP_LOCAL`, `KEEP_REMOTE` or `DEFER`. A decision is pinned to the
+`--choice` is `KEEP_LOCAL`, `KEEP_REMOTE` or `DEFER`. `DEFER` keeps the conflict
+open, and an open conflict refuses the **whole** `sessions apply`, not just that
+session — defer only what you will decide before the next apply. `sessions scan`
+exits with code `2` exactly when the plan holds such a decision (a conflict or a
+target collision); a session blocked only by an unproven layout or by the SQLite
+catalogue is left alone by the apply and does not change the exit code.
+
+A decision is pinned to the
 exact bytes of both branches: if either changes afterwards, the decision is
 refused as `STALE_RESOLUTION` rather than applied to a history you never saw.
 
@@ -90,7 +106,7 @@ kept its old modification time. A cloud mirror written before that disagrees
 with every session it holds.
 
 Such a conflict is marked `FORMAT_MIGRATION`, with `NEWER_FORMAT_LOCAL` or
-`NEWER_FORMAT_REMOTE`, and `doctor` warns (`session_format`) while one side is
+`NEWER_FORMAT_REMOTE` — only a divergence of content is, never a missing base, and `doctor` warns (`session_format`) while one side is
 still in the older format. It stays a conflict, because the two copies are not
 the same history, but one decision covers all of them:
 
@@ -124,13 +140,14 @@ codexsync -c config.toml sessions apply --plan sessions-plan.json --confirm-plan
   history is interleaved. The source is only read; the destination is in a
   verified backup before it is replaced.
 - A branch that loses a decision is also kept in an immutable **conflict bundle**
-  under `semantic.root_dir`. Backups expire by retention; the bundle is what
-  guarantees a divergent history is never the only copy in something that
-  expires.
+  under `semantic.root_dir`, in `conflicts/<conflict id>` — the id you resolved —
+  and both copies are re-hashed before it is committed. Backups expire by
+  retention; the bundle is what guarantees a divergent history is never the only
+  copy in something that expires.
 - An apply is **partial by design**. A conflict or a target collision stops the
   whole plan, because each names a decision only you can make. Items blocked on
-  an unproven layout or on the SQLite catalogue are reported and left where they
-  are.
+  an unproven layout, on the SQLite catalogue or on a copy that cannot be used
+  are reported and left where they are.
 - Active ↔ archive transitions are reported but not applied in 0.2: the move
   needs a delete, and codexSync never deletes a session file.
 
@@ -149,8 +166,11 @@ So a write **into** `.codex` needs two things:
   `UNSUPPORTED_STATE_BACKEND`.
 
 Writing **towards the cloud folder** is not gated: no Codex reads that copy, so a
-branch keeps the relative path it has locally. This is what lets a stale or
-missing mirror be rebuilt.
+branch the mirror does not hold yet keeps the relative path it has locally. A
+branch it already holds is rewritten where it is, even when the local copy lives
+elsewhere — archived here, still active in the mirror (`MIRROR_PATH_KEPT`) —
+because a second file for one session would make both drop out of every later
+plan. This is what lets a stale or missing mirror be rebuilt.
 
 ## The cloud mirror
 

@@ -6,13 +6,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 from uuid import uuid4
 
 from .exceptions import GuardianIntegrityError
 from .guardian_lock import GuardianWriterLock
 from .guardian_manifest import (
     build_guardian_manifest,
-    load_guardian_manifest,
     serialize_guardian_manifest,
     verify_guardian_snapshot,
 )
@@ -33,11 +33,22 @@ from .guardian_models import (
     build_snapshot_id,
     require_guardian_machine_id,
 )
-from .guardian_pointer import publish_latest_good
-from .guardian_retention import prune_quarantine, prune_snapshots, prune_staging
+from .guardian_pointer import (
+    publish_latest_good,
+    read_latest_good_pointer,
+    resolve_or_restore_latest_good,
+)
+from .guardian_retention import (
+    prune_quarantine,
+    prune_snapshots,
+    prune_staging,
+    prune_uncommitted_snapshots,
+)
 
 
 QUARANTINE_PAYLOAD_NAME = "source.bin"
+#: Temporary name of the ``COMMITTED`` marker before its atomic rename.
+COMMITTED_TEMP_NAME = f".{GUARDIAN_COMMITTED_NAME}.tmp"
 QUARANTINE_REASON_CODES = frozenset(
     {
         "NUL_BYTE", "UNSUPPORTED_BOM", "INVALID_UTF8", "INVALID_JSON", "DUPLICATE_JSON_KEY",
@@ -86,15 +97,25 @@ class GuardianStore:
             raise GuardianIntegrityError("Only fully validated Guardian observations may be committed")
         operation_id = str(uuid4())
         with GuardianWriterLock(self.root_dir, self.machine_id, operation_id=operation_id):
-            duplicate = self._find_committed_duplicate(observation.payload)
-            if duplicate is not None:
+            # A crash between publishing a snapshot and writing its marker
+            # leaves a directory that is neither committed nor ever read again.
+            prune_uncommitted_snapshots(
+                self.root_dir, self.machine_id, retention_hours=self.staging_retention_hours
+            )
+            latest, previous = self._latest_good()
+            if previous is not None and _same_payload(latest, previous, observation.payload):
                 return GuardianResult(
                     GuardianResultStatus.UNCHANGED,
                     validation=validation,
-                    snapshot=duplicate,
+                    snapshot=latest,
                 )
-            previous = self._latest_committed_manifest()
-            generation = 1 if previous is None else previous.generation + 1
+            generation = self._next_generation()
+            if previous is None and generation != 1:
+                raise GuardianIntegrityError(
+                    f"Guardian holds snapshots up to generation {generation - 1} for machine "
+                    f"{self.machine_id}, but none of them resolves as latest-good; refusing to start "
+                    "a second chain beside them"
+                )
             payload_sha256 = hashlib.sha256(observation.payload).hexdigest()
             snapshot = GuardianSnapshot(
                 root_dir=self.root_dir,
@@ -115,8 +136,9 @@ class GuardianStore:
                 self._publish_stage(stage_dir, snapshot, fault_hook)
                 self._write_committed_marker(snapshot, manifest, fault_hook)
             except Exception:
-                # Staging and uncommitted snapshot directories are intentionally retained
-                # for crash diagnostics; neither is a readable committed snapshot.
+                # Staging and uncommitted snapshot directories are retained for
+                # crash diagnostics; neither is a readable committed snapshot, and
+                # both are swept once older than staging_retention_hours.
                 raise
             verify_guardian_snapshot(snapshot, predecessor=previous)
             publish_latest_good(self.root_dir, snapshot)
@@ -155,6 +177,14 @@ class GuardianStore:
                     detail="duplicate",
                 )
             event_id = _build_event_id(operation_id)
+            # While latest-good is frozen, Codex rewrites the file every few
+            # minutes and each rewrite is a new rejected state with the same
+            # reason. One drop keeps two events -- the first and the newest --
+            # instead of a full copy per rewrite for 30 days (CS-313).
+            pointer = read_latest_good_pointer(self.root_dir, self.machine_id)
+            drop_key = _drop_key(validation, pointer.snapshot_id if pointer is not None else None)
+            earlier = self._events_of_drop(drop_key)
+            superseded = earlier[1:]
             stage_dir = self._stage_directory(f"quarantine-{operation_id}")
             _mkdir_private(stage_dir)
             if payload is not None:
@@ -171,6 +201,9 @@ class GuardianStore:
                 "payload_saved": payload is not None,
                 "project_count": validation.project_count,
                 "binding_count": validation.binding_count,
+                "drop_key": drop_key,
+                "first_event_id": earlier[0][0] if earlier else None,
+                "occurrences": 1 + sum(occurrences for _event, occurrences, _dir in superseded),
             }
             _write_private_file(
                 stage_dir / GUARDIAN_MANIFEST_NAME,
@@ -183,6 +216,9 @@ class GuardianStore:
                 raise GuardianIntegrityError("Refusing to overwrite an existing Guardian quarantine event")
             os.replace(stage_dir, destination)
             _fsync_directory(destination_parent)
+            # Only after the newest event is in place: it carries their count.
+            for _event, _occurrences, directory in superseded:
+                _remove_event_directory(directory, destination_parent)
             prune_quarantine(self.root_dir, self.machine_id, retention_days=self.quarantine_retention_days)
             return GuardianResult(
                 GuardianResultStatus.QUARANTINED,
@@ -239,57 +275,79 @@ class GuardianStore:
             "committed_at_utc": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
         }
         marker = snapshot.committed_path
-        temp_marker = marker.with_name(f".{GUARDIAN_COMMITTED_NAME}.{uuid4().hex}.tmp")
+        # Short and fixed: the directory is new and the writer lock is held, so
+        # nothing else can be writing here, and a random suffix made this the
+        # longest path in the store -- over 260 characters on a deep root (CS-310).
+        temp_marker = marker.with_name(COMMITTED_TEMP_NAME)
         _write_private_file(temp_marker, (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
         os.replace(temp_marker, marker)
         _fsync_directory(snapshot.directory)
         _fault(fault_hook, "committed")
 
-    def _latest_committed_manifest(self) -> GuardianManifest | None:
-        snapshots_root = self.root_dir / GUARDIAN_SNAPSHOTS_DIR_NAME / self.machine_id
-        if not snapshots_root.exists():
-            return None
-        candidates: list[tuple[GuardianManifest, GuardianSnapshot]] = []
-        for directory in snapshots_root.iterdir():
-            if not directory.is_dir() or not (directory / GUARDIAN_COMMITTED_NAME).is_file():
-                continue
-            try:
-                manifest = load_guardian_manifest(directory / GUARDIAN_MANIFEST_NAME)
-                snapshot = GuardianSnapshot(self.root_dir, self.machine_id, manifest.snapshot_id, manifest.generation)
-                if snapshot.directory != directory:
-                    continue
-                verify_guardian_snapshot(snapshot)
-                _verify_committed_marker(snapshot, manifest)
-            except GuardianIntegrityError:
-                continue
-            candidates.append((manifest, snapshot))
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: item[0].generation, reverse=True)
-        highest = candidates[0][0]
-        if sum(1 for manifest, _ in candidates if manifest.generation == highest.generation) != 1:
-            raise GuardianIntegrityError("Guardian committed snapshots have duplicate generations")
-        return highest
+    def _latest_good(self) -> tuple[GuardianSnapshot | None, GuardianManifest | None]:
+        """The baseline a new snapshot follows: ``latest-good``, not the highest number.
 
-    def _find_committed_duplicate(self, payload: bytes) -> GuardianSnapshot | None:
-        root = self.root_dir / GUARDIAN_SNAPSHOTS_DIR_NAME / self.machine_id
+        The two are the same in a healthy store. When they are not -- a pointer
+        that could not be advanced, a baseline a person accepted -- the manifest
+        must name the snapshot the state was actually judged against, because
+        retention protects exactly that predecessor of an accepted snapshot.
+        """
+        latest = resolve_or_restore_latest_good(self.root_dir, self.machine_id)
+        if latest is None:
+            return None, None
+        return latest, verify_guardian_snapshot(latest)
+
+    def _next_generation(self) -> int:
+        """One above every generation this machine's store has ever declared.
+
+        Every manifest and ``COMMITTED`` marker counts, committed or not and
+        verified or not, and so does the pointer. A file that exists but cannot
+        be read right now (a cloud client holding it, say) fails the commit
+        instead of being skipped: skipping it is how one number was issued twice
+        and every later commit then refused on duplicate generations (CS-297).
+        """
+        pointer = read_latest_good_pointer(self.root_dir, self.machine_id)
+        highest = pointer.generation if pointer is not None else 0
+        snapshots_root = self.root_dir / GUARDIAN_SNAPSHOTS_DIR_NAME / self.machine_id
+        if not snapshots_root.is_dir():
+            return highest + 1
+        try:
+            directories = list(snapshots_root.iterdir())
+        except OSError as exc:
+            raise GuardianIntegrityError("Cannot list Guardian snapshots; try again later") from exc
+        for directory in directories:
+            if directory.is_symlink() or not directory.is_dir():
+                continue
+            for name in (GUARDIAN_MANIFEST_NAME, GUARDIAN_COMMITTED_NAME):
+                path = directory / name
+                if os.path.lexists(path):
+                    highest = max(highest, _declared_generation(path))
+        return highest + 1
+
+    def _events_of_drop(self, drop_key: str) -> list[tuple[str, int, Path]]:
+        """``(event_id, occurrences, directory)`` of one drop, oldest first."""
+        root = self.root_dir / GUARDIAN_QUARANTINE_DIR_NAME / self.machine_id
         if not root.is_dir():
-            return None
-        digest = hashlib.sha256(payload).hexdigest()
-        for directory in root.iterdir():
-            if directory.is_symlink() or not directory.is_dir() or not (directory / GUARDIAN_COMMITTED_NAME).is_file():
+            return []
+        found: list[tuple[str, str, int, Path]] = []
+        for event_dir in root.iterdir():
+            if event_dir.is_symlink() or not event_dir.is_dir():
                 continue
             try:
-                manifest = load_guardian_manifest(directory / GUARDIAN_MANIFEST_NAME)
-                snapshot = GuardianSnapshot(self.root_dir, self.machine_id, manifest.snapshot_id, manifest.generation)
-                if snapshot.directory != directory or manifest.sha256 != digest or manifest.source_size != len(payload):
-                    continue
-                _verify_committed_marker(snapshot, manifest)
-                if snapshot.payload_path.read_bytes() == payload:
-                    return snapshot
-            except (GuardianIntegrityError, OSError):
+                raw = json.loads((event_dir / GUARDIAN_MANIFEST_NAME).read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
                 continue
-        return None
+            if not isinstance(raw, dict) or raw.get("drop_key") != drop_key:
+                continue
+            event_id, created = raw.get("event_id"), raw.get("created_at_utc")
+            occurrences = raw.get("occurrences", 1)
+            if event_id != event_dir.name or not isinstance(created, str):
+                continue
+            if isinstance(occurrences, bool) or not isinstance(occurrences, int) or occurrences < 1:
+                occurrences = 1
+            found.append((created, event_id, occurrences, event_dir))
+        found.sort(key=lambda item: (item[0], item[1]))
+        return [(event_id, occurrences, directory) for _created, event_id, occurrences, directory in found]
 
     def _find_quarantine_duplicate(self, payload_sha256: str | None, reason_codes: tuple[str, ...]) -> str | None:
         if payload_sha256 is None:
@@ -312,6 +370,49 @@ class GuardianStore:
             ):
                 return raw["event_id"]
         return None
+
+
+def _same_payload(snapshot: GuardianSnapshot | None, manifest: GuardianManifest, payload: bytes) -> bool:
+    """Whether ``payload`` is exactly what ``latest-good`` already holds.
+
+    Only latest-good counts. A state equal to an *older* snapshot -- the
+    ordinary result of ``guardian restore`` -- is a new observation and becomes
+    a new generation; answering UNCHANGED left latest-good on a state the file
+    no longer had (CS-325).
+    """
+    if snapshot is None or manifest.source_size != len(payload):
+        return False
+    if manifest.sha256 != hashlib.sha256(payload).hexdigest():
+        return False
+    try:
+        _verify_committed_marker(snapshot, manifest)
+        return snapshot.payload_path.read_bytes() == payload
+    except (GuardianIntegrityError, OSError):
+        return False
+
+
+def _declared_generation(path: Path) -> int:
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        raise GuardianIntegrityError(
+            f"Guardian cannot read {path.parent.name}/{path.name} right now; "
+            "not numbering past it, try again later"
+        ) from exc
+    try:
+        raw = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise GuardianIntegrityError(
+            f"Guardian {path.parent.name}/{path.name} is damaged and hides its generation; "
+            "move that snapshot directory out of the store"
+        ) from exc
+    generation = raw.get("generation") if isinstance(raw, dict) else None
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise GuardianIntegrityError(
+            f"Guardian {path.parent.name}/{path.name} declares no valid generation; "
+            "move that snapshot directory out of the store"
+        )
+    return generation
 
 
 def _verify_staged_payload(stage_dir: Path, manifest: GuardianManifest) -> None:
@@ -403,6 +504,32 @@ def _has_stable_payload(observation: SourceObservation) -> bool:
         and observation.source_mtime_ns_before is not None
         and observation.source_file_id_before == observation.source_file_id_after
     )
+
+
+def _drop_key(validation: ValidationReport, baseline_snapshot_id: str | None) -> str:
+    """What makes two rejections the same drop: verdict, reasons and baseline.
+
+    Counts are left out on purpose: a chat bound while latest-good is frozen
+    changes them without making it a different drop, and the newest event
+    still records the counts of its own state.
+    """
+    material = {
+        "category": validation.status.value,
+        "reason_codes": list(validation.codes),
+        "baseline_snapshot_id": baseline_snapshot_id,
+    }
+    canonical = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _remove_event_directory(directory: Path, parent: Path) -> None:
+    """Remove one superseded event; a failure leaves it for the next event."""
+    try:
+        if directory.is_symlink() or directory.parent.resolve() != parent.resolve():
+            return
+        shutil.rmtree(directory)
+    except OSError:
+        return
 
 
 def _validate_quarantine_codes(codes: tuple[str, ...]) -> None:

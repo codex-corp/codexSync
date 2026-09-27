@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Iterator
 
+from .fs_links import is_link
 from .jsonl_codec import JSONL_READ_ERRORS, is_branch_file, logical_name, logical_relative_path, open_jsonl
 from .progress import ProgressCallback, report
 
@@ -35,6 +36,18 @@ RECORD_FORMAT_ORDINAL = "ordinal"
 RECORD_FORMAT_MIXED = "mixed"
 #: Newer formats rank higher. Only a difference in rank means anything.
 RECORD_FORMAT_RANK = {RECORD_FORMAT_LEGACY: 0, RECORD_FORMAT_MIXED: 1, RECORD_FORMAT_ORDINAL: 2}
+
+
+#: Codes that make a branch `INVALID`: it cannot be compared safely, so it is
+#: never a side of a fast-forward -- and never mistaken for a side that is
+#: simply not there.
+INVALID_CODES = frozenset({
+    "LINE_TOO_LARGE", "NUL_BYTE", "UNSUPPORTED_BOM", "INVALID_RECORD", "RECORD_NOT_OBJECT",
+    "MISSING_INITIAL_SESSION_META", "MISSING_SESSION_ID", "CONFLICTING_SESSION_META", "READ_ERROR",
+    "READ_CHANGED", "INVALID_TAIL",
+})
+#: The code that makes a branch `AMBIGUOUS`: one session id in two files.
+DUPLICATE_SESSION_ID = "DUPLICATE_SESSION_ID"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +129,7 @@ def scan_sessions(
     }
     if branches:
         descriptors = [
-            _with_code(item, SessionState.AMBIGUOUS, "DUPLICATE_SESSION_ID")
+            _with_code(item, SessionState.AMBIGUOUS, DUPLICATE_SESSION_ID)
             if item.session_id in branches else item
             for item in descriptors
         ]
@@ -156,7 +169,19 @@ def _scan_jsonl(
     volatile: bool,
     source_machine: str | None,
 ) -> SessionDescriptor:
-    before = path.stat()
+    try:
+        before = path.stat()
+    except OSError:
+        # Listed a moment ago and gone now, or not readable at all. Either way
+        # this one branch cannot be described, which is not a reason to stop
+        # describing the others: it is recorded as unreadable, and a branch that
+        # cannot be read is never treated as absent.
+        return SessionDescriptor(
+            session_id=None, state=SessionState.INVALID,
+            relative_path=path.relative_to(root).as_posix(),
+            sha256=hashlib.sha256().hexdigest(), byte_count=0, line_count=0,
+            source_machine=source_machine, codes=("READ_ERROR",),
+        )
     digest = hashlib.sha256()
     byte_count = 0
     line_count = 0
@@ -240,20 +265,20 @@ def _scan_jsonl(
         # Includes a truncated or corrupt container, which is what a mirror
         # being written by a cloud client looks like mid-copy.
         codes.append("READ_ERROR")
-    after = path.stat()
-    if _signature(before) != _signature(after):
+    try:
+        after = path.stat()
+    except OSError:
+        # Removed or replaced while it was being read.
+        after = None
+    if after is None or _signature(before) != _signature(after):
         codes.append("READ_CHANGED")
+        after = after or before
     if not complete_tail:
         codes.append("INCOMPLETE_TAIL" if volatile else "INVALID_TAIL")
     hint = Path(logical_name(path.name)).stem
     if session_id and session_id not in hint:
         codes.append("FILENAME_ID_MISMATCH")
-    invalid_codes = {
-        "LINE_TOO_LARGE", "NUL_BYTE", "UNSUPPORTED_BOM", "INVALID_RECORD", "RECORD_NOT_OBJECT",
-        "MISSING_INITIAL_SESSION_META", "MISSING_SESSION_ID", "CONFLICTING_SESSION_META", "READ_ERROR",
-        "READ_CHANGED", "INVALID_TAIL",
-    }
-    state = SessionState.INVALID if invalid_codes.intersection(codes) else lifecycle
+    state = SessionState.INVALID if INVALID_CODES.intersection(codes) else lifecycle
     return SessionDescriptor(
         session_id=session_id,
         state=state,
@@ -362,7 +387,14 @@ def _require_inside(path: Path, root: Path) -> None:
 
 
 def _is_reparse(path: Path) -> bool:
+    """Whether an entry is a link the scan must not follow or read through.
+
+    Only a reparse point that names another location counts (``fs_links``):
+    a cloud placeholder is an ordinary session file, and skipping it made a
+    checkout inside Yandex.Disk or OneDrive lose sessions with no error.
+    """
     try:
-        return bool(getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400)
+        info = path.stat(follow_symlinks=False)
     except OSError:
         return True
+    return is_link(path, info)

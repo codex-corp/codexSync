@@ -201,9 +201,9 @@ class FakeController(Controller):
 
         return self._answer("mapping_hints", Outcome(value=MappingHints(
             machines=("desktop", "laptop"),
-            chat_roots=(("D:/Projects/NetRuleRouter", 26), ("D:/Projects/Other", 4)),
-            unmapped_roots=("D:/Projects/NetRuleRouter",),
-            local_project_roots=("C:/Work/NetRuleRouter",),
+            chat_roots=(("D:/Projects/HarborProxy", 26), ("D:/Projects/Other", 4)),
+            unmapped_roots=("D:/Projects/HarborProxy",),
+            local_project_roots=("C:/Work/HarborProxy",),
             remote_project_roots=("D:/Projects/Gone",),
         )))
 
@@ -314,6 +314,20 @@ class FakeController(Controller):
         self.calls.append(("run_automation_now",))
         return Outcome(failure=Failure.CODEX_NOT_STOPPED, message="open")
 
+    def home(self) -> Outcome:
+        return self._answer("home", Outcome(failure=Failure.CONFIGURATION, message="not in this test"))
+
+    def recount_state(self, *, progress=None) -> Outcome:
+        self.calls.append(("recount_state",))
+        return self._answer("recount_state", Outcome(failure=Failure.CONFIGURATION, message="not in this test"))
+
+    def codex_backups(self) -> Outcome:
+        return self._answer("codex_backups", Outcome(value=[]))
+
+    def create_codex_backup(self, *, progress=None) -> Outcome:
+        self.calls.append(("create_codex_backup",))
+        return self._answer("create_codex_backup", Outcome(failure=Failure.CODEX_NOT_STOPPED, message="open"))
+
 
 
 _MIGRATION_DIFF = "--- config.toml\n+++ config.toml\n-session_mode = \"last_date_only\"\n+session_mode = \"all\"\n"
@@ -405,6 +419,15 @@ class _WindowTestCase(unittest.TestCase):
         )
         scheduler.start()
         self.addCleanup(scheduler.stop)
+        # Home reads the OS tasks and the process list too (CS-275), and the
+        # Automation page lists the copies folder; both are answered here.
+        for name in ("home", "codex_backups"):
+            patcher = mock.patch(
+                f"codexsync.gui.controller.Controller.{name}",
+                return_value=Outcome(failure=Failure.CONFIGURATION, message="not in this test"),
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def pump(self, until=None, *, seconds: float = 20.0) -> None:
         """Run the event loop until ``until()`` holds, or the deadline passes.
@@ -493,7 +516,7 @@ class WindowTests(_WindowTestCase):
         russian = load("ru")
         self.assertEqual(window.catalog.language, "ru")
         self.assertEqual(window._stack.currentIndex(), PAGES.index("sync"))
-        self.assertEqual(window._nav.item(0).text(), russian.text("nav.overview"))
+        self.assertEqual(window._nav.item(0).text(), russian.text("nav.home"))
         self.assertEqual(window.screen("sync").table.rowCount(), 3)
 
     def test_a_result_that_lands_after_a_rebuild_is_drawn_by_the_new_widgets(self) -> None:
@@ -610,7 +633,16 @@ class PlacementTests(_WindowTestCase):
         )
 
 
-class OverviewTests(_WindowTestCase):
+class _OverviewCase(_WindowTestCase):
+    """Home is the first page since CS-275; these tests are about Overview."""
+
+    def make(self, *args, **kwargs):
+        window, controller = super().make(*args, **kwargs)
+        window.go_to("overview")
+        return window, controller
+
+
+class OverviewTests(_OverviewCase):
     def test_a_stopped_codex_reads_as_allowed(self) -> None:
         window, _ = self.make()
         screen = window.screen("overview")
@@ -660,7 +692,7 @@ class OverviewTests(_WindowTestCase):
         self.assertIn(window.catalog.plural("dry_run.plan.actions", 3), screen.dry_run_result.text())
 
 
-class OverviewSideTests(_WindowTestCase):
+class OverviewSideTests(_OverviewCase):
     def test_an_open_journal_is_announced_on_the_overview(self) -> None:
         window, _ = self.make()
         screen = window.screen("overview")
@@ -1003,13 +1035,16 @@ class BackupsTests(_WindowTestCase):
 
 
 class RecoveryTests(_WindowTestCase):
-    def test_an_open_journal_blocks_and_rollback_needs_an_explicit_target(self) -> None:
+    def test_an_open_journal_blocks_and_rollback_goes_to_each_files_own_side(self) -> None:
         window, controller = self.make()
         window.go_to("recovery")
         screen = window.screen("recovery")
         self.assertEqual(screen.banner.title.text(), window.catalog.plural("recovery.blocked.title", 1))
         screen.table.selectRow(0)
-        self.assertFalse(screen.rollback_dry.isEnabled(), "the target is never guessed")
+        # No side chosen: each file goes back to the side its backup recorded (CS-293).
+        self.assertTrue(screen.rollback_dry.isEnabled())
+        screen.act("rollback", dry_run=True)
+        self.assertIn(("rollback", "op-1", None, True), controller.calls)
         screen.target.setCurrentIndex(screen.target.findData("local"))
         self.assertTrue(screen.rollback_dry.isEnabled())
         self.assertFalse(screen.rollback_apply.isEnabled())
@@ -1088,6 +1123,7 @@ class ProjectMoveScreenTests(_WindowTestCase):
         window, controller = self.make(controller=controller)
         window.go_to("projects")
         screen = window.screen("projects")
+        screen.refresh()  # arrival no longer scans (CS-309)
         screen.move_project.setCurrentIndex(screen.move_project.findData("p1"))
         screen.move_target.setText("E:/new/alpha")
         return window, controller, screen
@@ -1432,12 +1468,12 @@ class MappingFormTests(_WindowTestCase):
     def test_the_folders_this_machine_cannot_find_are_offered(self) -> None:
         _window, screen = self._screen()
         offered = [screen.mapping_from.itemText(i) for i in range(screen.mapping_from.count())]
-        self.assertIn("D:/Projects/NetRuleRouter", offered, "a chat names it and it is not here")
+        self.assertIn("D:/Projects/HarborProxy", offered, "a chat names it and it is not here")
         self.assertIn("D:/Projects/Gone", offered, "a project root that is not here either")
 
     def test_the_form_says_how_many_chats_a_rule_would_reach(self) -> None:
         window, screen = self._screen()
-        screen.mapping_from.setEditText("D:/Projects/NetRuleRouter")
+        screen.mapping_from.setEditText("D:/Projects/HarborProxy")
         self.assertEqual(
             screen.mapping_reach.text(), window.catalog.plural("settings.mapping.reach", 26),
         )
@@ -2085,8 +2121,8 @@ class ConfigScreensTests(_WindowTestCase):
         )
         with mock.patch("codexsync.gui.controller.Controller.automation", return_value=Outcome(value=view)):
             window, _ = self.make(controller=Controller(path))
-            window.go_to("settings")
-        screen = window.screen("settings")
+            window.go_to("automation")
+        screen = window.screen("automation")
         self.assertTrue(screen._widgets[("scheduler", "sync_at_login")].isChecked())
         self.assertIn(window.catalog.text("automation.exit.3"), screen.login_task.text())
         screen._widgets[("scheduler", "sync_at_login")].setChecked(False)
@@ -2101,19 +2137,268 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertFalse(screen._widgets[("safety", "require_codex_stopped")].isEnabled())
         self.assertFalse(screen._widgets[("safety", "fail_on_unknown")].isEnabled())
 
+    def test_the_period_is_shown_in_minutes_from_five_with_thirty_by_default(self) -> None:
+        path = self._create()
+        window, _ = self.make(controller=Controller(path))
+        window.go_to("automation")
+        widget = window.screen("automation")._widgets[("scheduler", "interval_seconds")]
+        self.assertEqual(widget.value(), 30)
+        self.assertEqual(widget.minimum(), 5)
+        self.assertEqual(window.screen("automation").edits().values, {})
+
     def test_changing_automation_drops_the_legacy_scheduler_keys(self) -> None:
         path = self._create()
         text = path.read_text(encoding="utf-8").replace("[scheduler]\n", "[scheduler]\nkind = \"windows_task_scheduler\"\ninterval_minutes = 10\n")
         path.write_text(text, encoding="utf-8")
         window, _ = self.make(controller=Controller(path))
-        window.go_to("settings")
-        screen = window.screen("settings")
-        screen._widgets[("scheduler", "interval_seconds")].setValue(900)
+        window.go_to("automation")
+        screen = window.screen("automation")
+        # The period is edited in minutes and stored in seconds (CS-313).
+        screen._widgets[("scheduler", "interval_seconds")].setValue(15)
         edits = screen.edits().values
         self.assertEqual(edits[("scheduler", "interval_seconds")], 900)
         self.assertIn(("scheduler", "kind"), edits)
         self.assertIn(("scheduler", "interval_minutes"), edits)
 
+
+class AutomationPageTests(_WindowTestCase):
+    """CS-276: every OS task on its own page, and copies of .codex."""
+
+    def _create(self) -> Path:
+        from codexsync.config_edit import create_config
+
+        root = SANDBOX / f"gui-automation-{uuid.uuid4().hex[:8]}"
+        (root / "codex").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, root, True)
+        path = root / "config.toml"
+        create_config(path, machine_id="laptop", local_state_dir=str(root / "codex"),
+                      workspace_root_dir=str(root / "workspace"))
+        return path
+
+    def _view(self, **values):
+        from codexsync.app import AutomationView
+        from codexsync.system_scheduler import SchedulerStatus
+
+        return AutomationView(
+            False, "guardian_snapshot", 60, True, 0, 0, ("py",), (), True, SchedulerStatus(installed=False),
+            **values,
+        )
+
+    def test_settings_no_longer_has_an_automation_tab(self) -> None:
+        window, _ = self.make(controller=Controller(self._create()))
+        window.go_to("settings")
+        self.assertNotIn("automation", window.screen("settings")._tab_ids)
+        self.assertNotIn(("scheduler", "enabled"), window.screen("settings")._widgets)
+
+    def test_without_a_folder_no_copy_can_be_taken(self) -> None:
+        window, _ = self.make(controller=Controller(self._create()))
+        window.go_to("automation")
+        screen = window.screen("automation")
+        self.assertFalse(screen.copy_now.isEnabled())
+        self.assertEqual(screen.backup_task.text(), window.catalog.text("automation.backup.no_folder"))
+
+    def test_the_copy_task_reads_its_last_result_in_words(self) -> None:
+        from codexsync.config_edit import set_value
+        from codexsync.system_scheduler import SchedulerStatus
+
+        path = self._create()
+        text = path.read_text(encoding="utf-8")
+        text = set_value(text, "state_backup", "root_dir", (path.parent / "copies").as_posix())
+        text = set_value(text, "state_backup", "at_login", True)
+        path.write_text(text, encoding="utf-8")
+        view = self._view(
+            backup_root=path.parent / "copies", backup_at_login=True,
+            backup_status=SchedulerStatus(installed=True, last_run_utc="2026-09-25T07:00:00Z", last_result=3,
+                                          definition_matches=True),
+        )
+        with mock.patch("codexsync.gui.controller.Controller.automation", return_value=Outcome(value=view)):
+            window, _ = self.make(controller=Controller(path))
+            window.go_to("automation")
+        screen = window.screen("automation")
+        self.assertTrue(screen.copy_now.isEnabled())
+        self.assertIn(window.catalog.text("automation.exit.3"), screen.backup_task.text())
+        self.assertIn(window.catalog.text("automation.backup.when.login"), screen.backup_task.text())
+        # The line follows the draft: switching both schedules off says so.
+        screen._widgets[("state_backup", "at_login")].setChecked(False)
+        self.assertEqual(screen.backup_task.text(), window.catalog.text("automation.backup.installed_but_off"))
+
+    def test_a_save_here_keeps_what_was_typed_on_settings(self) -> None:
+        """CS-280: two pages, one file; a save on one must not drop the other's draft."""
+        path = self._create()
+        window, _ = self.make(controller=Controller(path))
+        window.go_to("settings")
+        settings = window.screen("settings")
+        settings._widgets[("backup", "retention_days")].setValue(45)
+        window.go_to("automation")
+        automation = window.screen("automation")
+        automation._widgets[("state_backup", "keep")].setValue(7)
+        automation.check(save=True)
+        self.pump(lambda: "keep = 7" in path.read_text(encoding="utf-8"))
+        self.assertEqual(window.screen("automation").model.draft, {}, "what was saved is no longer a draft")
+        window.go_to("settings")
+        settings = window.screen("settings")
+        self.pump(lambda: settings.model.opened is not None)
+        self.assertEqual(settings.edits().values, {("backup", "retention_days"): 45})
+        self.assertEqual(settings._widgets[("backup", "retention_days")].value(), 45)
+        settings.check(save=True)
+        self.pump(lambda: "retention_days = 45" in path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("keep = 7", text, "the rebased save kept the other page's change")
+
+    def test_a_draft_the_file_now_agrees_with_is_dropped(self) -> None:
+        path = self._create()
+        window, _ = self.make(controller=Controller(path))
+        window.go_to("settings")
+        window.screen("settings")._widgets[("backup", "retention_days")].setValue(45)
+        from codexsync.config_edit import set_value
+
+        path.write_text(set_value(path.read_text(encoding="utf-8"), "backup", "retention_days", 45), encoding="utf-8")
+        window.config_changed()
+        window.go_to("settings")
+        settings = window.screen("settings")
+        self.pump(lambda: settings.model.opened is not None)
+        self.assertEqual(settings.model.draft, {})
+
+    def test_a_copy_refused_while_codex_is_open_says_why(self) -> None:
+        controller = FakeController()
+        window, _ = self.make(controller=controller)
+        window.go_to("automation")
+        screen = window.screen("automation")
+        screen.create_copy()
+        self.assertIn(("create_codex_backup",), controller.calls)
+        self.assertIn(window.catalog.text("failure.codex-not-stopped"), screen.copy_status.text())
+
+    def test_copies_are_listed_with_other_machines_marked(self) -> None:
+        from codexsync.app import StateBackupEntry
+
+        controller = FakeController()
+        controller.outcomes["codex_backups"] = Outcome(value=[
+            StateBackupEntry("codex-laptop-20260925T070000Z.zip", Path("C:/c/a.zip"), "laptop",
+                             "2026-09-25T07:00:00Z", 3 * 1024 * 1024, True),
+            StateBackupEntry("codex-desktop-20260924T070000Z.zip", Path("C:/c/b.zip"), "desktop",
+                             "2026-09-24T07:00:00Z", 1024, False),
+        ])
+        window, _ = self.make(controller=controller)
+        window.go_to("automation")
+        screen = window.screen("automation")
+        self.assertEqual(screen.copies_table.rowCount(), 2)
+        self.assertIn("3.0 MiB", screen.copies_summary.text())
+        self.assertEqual(
+            screen.copies_table.item(1, 2).text(),
+            window.catalog.text("automation.backup.other_machine", machine="desktop"),
+        )
+
+
+def _summary(**values):
+    from codexsync.home_stats import CopiesStats, GuardianStats, HomeSummary, StateStats, SyncStats
+
+    defaults = dict(
+        codex="stopped",
+        sync=SyncStats(_SYNC_HISTORY[0], 3, 1, 6, 1),
+        open_journals=0,
+        backups=CopiesStats(2, 2048, "2026-09-24T13:36:29Z"),
+        copies=CopiesStats(0, 0, None),
+        copies_configured=False,
+        guardian=GuardianStats("2026-09-25T06:00:00Z", 12, 1, 0),
+        automation=None,
+        state=StateStats("2026-09-25T06:30:00Z", 152, 98, 23, 16, 2, 0, 900 * 1024 * 1024),
+    )
+    defaults.update(values)
+    return HomeSummary(**defaults)
+
+
+def _pages():
+    from codexsync.gui.window import PAGES
+
+    return PAGES
+
+
+class HomeTests(_WindowTestCase):
+    """CS-275: the first page, beside Overview, one tile per thing kept."""
+
+    def test_home_is_the_first_page_and_overview_stays(self) -> None:
+        self.assertEqual(_pages()[0], "home")
+        self.assertIn("overview", _pages())
+        window, _ = self.make()
+        self.assertEqual(window._stack.currentIndex(), 0)
+
+    def test_tiles_say_what_the_summary_holds(self) -> None:
+        controller = FakeController()
+        controller.outcomes["home"] = Outcome(value=_summary())
+        window, _ = self.make(controller=controller)
+        screen = window.screen("home")
+        catalog = window.catalog
+        self.assertEqual(screen.banner.title.text(), catalog.text("home.codex.stopped"))
+        _sync_value, sync_details, _ = screen.tiles["sync"]
+        self.assertIn(catalog.plural("home.sync.runs", 3), sync_details.text())
+        self.assertIn(catalog.text("home.sync.files", to_cloud=6, to_local=1), sync_details.text())
+        state_value, state_details, _ = screen.tiles["state"]
+        self.assertIn(catalog.plural("home.state.chats", 152), state_value.text())
+        self.assertIn(catalog.plural("home.state.without_project", 2), state_details.text())
+        copies_value, _, _ = screen.tiles["copies"]
+        self.assertEqual(copies_value.text(), catalog.text("home.copies.no_folder"))
+        self.assertFalse(screen.recovery.isVisibleTo(screen))
+
+    def test_a_part_that_failed_is_one_tile_saying_so(self) -> None:
+        controller = FakeController()
+        controller.outcomes["home"] = Outcome(value=_summary(guardian=None, errors={"guardian": "no identity"}))
+        window, _ = self.make(controller=controller)
+        value, details, _ = window.screen("home").tiles["guardian"]
+        self.assertEqual(value.text(), window.catalog.text("home.unreadable"))
+        self.assertEqual(details.text(), "no identity")
+        sync_value, _, _ = window.screen("home").tiles["sync"]
+        self.assertTrue(sync_value.text(), "the other tiles still draw")
+
+    def test_an_open_journal_is_announced_on_home_too(self) -> None:
+        controller = FakeController()
+        controller.outcomes["home"] = Outcome(value=_summary(open_journals=1))
+        window, _ = self.make(controller=controller)
+        screen = window.screen("home")
+        self.assertTrue(screen.recovery.isVisibleTo(screen))
+
+    def test_counts_are_recounted_only_on_request(self) -> None:
+        from codexsync.home_stats import StateStats
+
+        controller = FakeController()
+        controller.outcomes["home"] = Outcome(value=_summary(state=None))
+        window, _ = self.make(controller=controller)
+        screen = window.screen("home")
+        self.assertNotIn(("recount_state",), controller.calls, "opening the page scans nothing")
+        value, _, _ = screen.tiles["state"]
+        self.assertEqual(value.text(), window.catalog.text("home.state.unknown"))
+        controller.outcomes["recount_state"] = Outcome(value=StateStats("2026-09-25T08:00:00Z", 5, 0, 0, 2, 0, 0, 10))
+        screen.recount()
+        self.assertIn(("recount_state",), controller.calls)
+        self.assertIn(window.catalog.plural("home.state.chats", 5), value.text())
+
+    def test_a_newer_scan_elsewhere_replaces_an_older_recount(self) -> None:
+        """CS-281: the tile shows the newest count, not the last one made here."""
+        from codexsync.home_stats import StateStats
+
+        controller = FakeController()
+        controller.outcomes["home"] = Outcome(value=_summary(state=None))
+        window, _ = self.make(controller=controller)
+        screen = window.screen("home")
+        controller.outcomes["recount_state"] = Outcome(value=StateStats("2026-09-25T08:00:00Z", 5, 0, 0, 2, 0, 0, 10))
+        screen.recount()
+        newer = StateStats("2026-09-25T09:00:00Z", 7, 0, 0, 2, 0, 0, 10)
+        controller.outcomes["home"] = Outcome(value=_summary(state=newer))
+        screen.refresh()
+        value, _, _ = window.screen("home").tiles["state"]
+        self.assertIn(window.catalog.plural("home.state.chats", 7), value.text())
+        # ...and an older cache never hides a newer recount.
+        controller.outcomes["home"] = Outcome(value=_summary(state=StateStats("2026-09-25T07:00:00Z", 3, 0, 0, 2, 0, 0, 10)))
+        controller.outcomes["recount_state"] = Outcome(value=StateStats("2026-09-25T10:00:00Z", 9, 0, 0, 2, 0, 0, 10))
+        screen.recount()
+        screen.refresh()
+        value, _, _ = window.screen("home").tiles["state"]
+        self.assertIn(window.catalog.plural("home.state.chats", 9), value.text())
+
+    def test_the_sync_tile_opens_the_history(self) -> None:
+        window, controller = self.make()
+        window.screen("home")._open_history()
+        self.assertEqual(window._stack.currentIndex(), _pages().index("sync"))
+        self.assertTrue(any(call[0] == "sync_history" for call in controller.calls))
 
 class AboutTests(_WindowTestCase):
     """The one screen that asks the core nothing still has to be true."""
@@ -2406,6 +2691,10 @@ class ArrivalDoesNotScanTests(_WindowTestCase):
 
     def test_the_chats_screen_reads_nothing_on_arrival(self) -> None:
         self.assertNotIn("chats", self._arrive("chats"))
+
+    def test_the_projects_screen_reads_nothing_on_arrival(self) -> None:
+        """CS-309: its list is the same full chat scan; the refresh button asks for it."""
+        self.assertNotIn("chats", self._arrive("projects"))
 
     def test_the_sessions_screen_reads_no_codex_file_on_arrival(self) -> None:
         reads = self._arrive("sessions")

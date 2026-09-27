@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from .jsonl_codec import parse_codec
 from .path_mapping import PathMappingRule
 from .process_knowledge import default_background_process_names, default_process_names
 from .models import (
+    MAX_SCHEDULER_INTERVAL_SECONDS,
+    MAX_STATE_BACKUP_INTERVAL_HOURS,
     MIN_SCHEDULER_INTERVAL_SECONDS,
     SCHEDULER_MODES,
     AppConfig,
@@ -23,6 +26,7 @@ from .models import (
     SafetyConfig,
     SchedulerConfig,
     SemanticConfig,
+    StateBackupConfig,
     StateConfig,
     SyncConfig,
     TargetsConfig,
@@ -65,13 +69,32 @@ def _to_path(
         if required:
             raise ConfigError(f"Missing required path field: {field_name}")
         return None
+    if not isinstance(value, str):
+        raise ConfigError(f"{field_name} must be a string path")
 
-    resolved = _expand_workspace_var(value, workspace_root, field_name)
+    resolved = strip_extended_length_prefix(_expand_workspace_var(value, workspace_root, field_name))
     raw = Path(resolved).expanduser()
     if raw.is_absolute():
         return raw.resolve()
     anchor = workspace_root if workspace_root else base_dir
     return (anchor / raw).resolve()
+
+
+_EXTENDED_UNC = re.compile(r"^[\\/]{2}\?[\\/]UNC[\\/]", re.IGNORECASE)
+_EXTENDED = re.compile(r"^[\\/]{2}\?[\\/]")
+
+
+def strip_extended_length_prefix(value: str) -> str:
+    r"""``\\?\C:\x`` -> ``C:\x`` and ``\\?\UNC\srv\share`` -> ``\\srv\share`` (CS-320).
+
+    `Path.resolve` turns an extended-length path into ``C:x`` -- a drive
+    without a root -- so it compared as unrelated to every other folder and
+    walked straight past each overlap check. The prefix only lifts the length
+    limit; the folder it names is the one without it.
+    """
+    if _EXTENDED_UNC.match(value):
+        return "\\\\" + _EXTENDED_UNC.sub("", value, count=1)
+    return _EXTENDED.sub("", value, count=1)
 
 
 def _expand_workspace_var(raw_value: str, workspace_root: Path | None, field_name: str) -> str:
@@ -124,20 +147,21 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"Invalid TOML in {source}: {exc}") from exc
 
-    identity_raw = raw.get("identity", {})
-    paths_raw = raw.get("paths", {})
-    sync_raw = raw.get("sync", {})
-    safety_raw = raw.get("safety", {})
-    proc_raw = raw.get("process_detection", {})
-    backup_raw = raw.get("backup", {})
-    filters_raw = raw.get("filters", {})
-    targets_raw = raw.get("targets", {})
-    conflict_raw = raw.get("conflict", {})
-    state_raw = raw.get("state", {})
-    logging_raw = raw.get("logging", {})
-    guardian_raw = raw.get("guardian", {})
-    semantic_raw = raw.get("semantic", {})
-    scheduler_raw = raw.get("scheduler", {})
+    identity_raw = _section(raw, "identity")
+    paths_raw = _section(raw, "paths")
+    sync_raw = _section(raw, "sync")
+    safety_raw = _section(raw, "safety")
+    proc_raw = _section(raw, "process_detection")
+    backup_raw = _section(raw, "backup")
+    filters_raw = _section(raw, "filters")
+    targets_raw = _section(raw, "targets")
+    conflict_raw = _section(raw, "conflict")
+    state_raw = _section(raw, "state")
+    logging_raw = _section(raw, "logging")
+    guardian_raw = _section(raw, "guardian")
+    semantic_raw = _section(raw, "semantic")
+    scheduler_raw = _section(raw, "scheduler")
+    state_backup_raw = _section(raw, "state_backup")
     path_mappings_raw = raw.get("path_mappings", [])
 
     identity = IdentityConfig(machine_id=identity_raw.get("machine_id"))
@@ -192,19 +216,19 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
     assert guardian_root is not None
     guardian = GuardianConfig(
         root_dir=guardian_root,
-        max_state_bytes=int(guardian_raw.get("max_state_bytes", 64 * 1024 * 1024)),
-        shrink_min_count=int(guardian_raw.get("shrink_min_count", 2)),
-        shrink_ratio=float(guardian_raw.get("shrink_ratio", 0.25)),
-        retention_days=int(guardian_raw.get("retention_days", 30)),
-        max_snapshots=int(guardian_raw.get("max_snapshots", 100)),
-        quarantine_retention_days=int(guardian_raw.get("quarantine_retention_days", 30)),
-        staging_retention_hours=int(guardian_raw.get("staging_retention_hours", 24)),
-        poll_interval_seconds=float(guardian_raw.get("poll_interval_seconds", 3)),
-        debounce_seconds=float(guardian_raw.get("debounce_seconds", 2)),
-        stable_reads=int(guardian_raw.get("stable_reads", 3)),
-        stable_read_interval_seconds=float(guardian_raw.get("stable_read_interval_seconds", 0.5)),
-        fallback_scan_seconds=float(guardian_raw.get("fallback_scan_seconds", 60)),
-        once_timeout_seconds=float(guardian_raw.get("once_timeout_seconds", 120)),
+        max_state_bytes=_int_value(guardian_raw, "max_state_bytes", 64 * 1024 * 1024, "guardian.max_state_bytes"),
+        shrink_min_count=_int_value(guardian_raw, "shrink_min_count", 2, "guardian.shrink_min_count"),
+        shrink_ratio=_float_value(guardian_raw, "shrink_ratio", 0.25, "guardian.shrink_ratio"),
+        retention_days=_int_value(guardian_raw, "retention_days", 30, "guardian.retention_days"),
+        max_snapshots=_int_value(guardian_raw, "max_snapshots", 100, "guardian.max_snapshots"),
+        quarantine_retention_days=_int_value(guardian_raw, "quarantine_retention_days", 30, "guardian.quarantine_retention_days"),
+        staging_retention_hours=_int_value(guardian_raw, "staging_retention_hours", 24, "guardian.staging_retention_hours"),
+        poll_interval_seconds=_float_value(guardian_raw, "poll_interval_seconds", 3, "guardian.poll_interval_seconds"),
+        debounce_seconds=_float_value(guardian_raw, "debounce_seconds", 2, "guardian.debounce_seconds"),
+        stable_reads=_int_value(guardian_raw, "stable_reads", 3, "guardian.stable_reads"),
+        stable_read_interval_seconds=_float_value(guardian_raw, "stable_read_interval_seconds", 0.5, "guardian.stable_read_interval_seconds"),
+        fallback_scan_seconds=_float_value(guardian_raw, "fallback_scan_seconds", 60, "guardian.fallback_scan_seconds"),
+        once_timeout_seconds=_float_value(guardian_raw, "once_timeout_seconds", 120, "guardian.once_timeout_seconds"),
     )
     semantic_root = _to_path(
         semantic_raw.get("root_dir", "${workspace_root}/semantic" if workspace_root_dir else "semantic"),
@@ -219,7 +243,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         raise ConfigError(f"semantic.mirror_compression: {exc}") from exc
     semantic = SemanticConfig(
         semantic_root,
-        int(semantic_raw.get("max_jsonl_line_bytes", 64 * 1024 * 1024)),
+        _int_value(semantic_raw, "max_jsonl_line_bytes", 64 * 1024 * 1024, "semantic.max_jsonl_line_bytes"),
         mirror_compression,
     )
 
@@ -227,9 +251,9 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         mode=sync_raw.get("mode", "cold"),
         direction=sync_raw.get("direction", "bidirectional"),
         compare=str(sync_raw.get("compare", "mtime")).strip().lower(),
-        time_tolerance_seconds=int(sync_raw.get("time_tolerance_seconds", 0)),
+        time_tolerance_seconds=_int_value(sync_raw, "time_tolerance_seconds", 0, "sync.time_tolerance_seconds"),
         equal_mtime_action=str(sync_raw.get("equal_mtime_action", "skip")).strip().lower(),
-        dry_run_default=bool(sync_raw.get("dry_run_default", True)),
+        dry_run_default=_bool_value(sync_raw, "dry_run_default", True, "sync.dry_run_default"),
         delete_policy=sync_raw.get("delete_policy", "never"),
         session_mode=(
             str(sync_raw.get("session_mode")).strip().lower()
@@ -239,33 +263,36 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
     )
 
     safety = SafetyConfig(
-        require_codex_stopped=bool(safety_raw.get("require_codex_stopped", True)),
-        fail_on_unknown=bool(safety_raw.get("fail_on_unknown", True)),
+        require_codex_stopped=_bool_value(safety_raw, "require_codex_stopped", True, "safety.require_codex_stopped"),
+        fail_on_unknown=_bool_value(safety_raw, "fail_on_unknown", True, "safety.fail_on_unknown"),
     )
 
     background_process_names = _parse_background_process_names(proc_raw)
     process_detection = ProcessDetectionConfig(
         process_names=_parse_process_names(proc_raw.get("process_names", default_process_names())),
-        grace_period_seconds=int(proc_raw.get("grace_period_seconds", 2)),
-        allow_terminate_if_running=bool(proc_raw.get("allow_terminate_if_running", False)),
-        manual_terminate_confirmation=bool(proc_raw.get("manual_terminate_confirmation", True)),
+        grace_period_seconds=_int_value(proc_raw, "grace_period_seconds", 2, "process_detection.grace_period_seconds"),
+        allow_terminate_if_running=_bool_value(proc_raw, "allow_terminate_if_running", False, "process_detection.allow_terminate_if_running"),
+        manual_terminate_confirmation=_bool_value(proc_raw, "manual_terminate_confirmation", True, "process_detection.manual_terminate_confirmation"),
         terminate_confirmation_mode=str(proc_raw.get("terminate_confirmation_mode", "gui")).strip().lower(),
-        terminate_timeout_seconds=int(proc_raw.get("terminate_timeout_seconds", 20)),
+        terminate_timeout_seconds=_int_value(proc_raw, "terminate_timeout_seconds", 20, "process_detection.terminate_timeout_seconds"),
         background_process_names=background_process_names,
     )
 
     backup = BackupConfig(
-        backup_before_overwrite=bool(backup_raw.get("backup_before_overwrite", True)),
-        retention_days=int(backup_raw.get("retention_days", 30)),
-        max_backups=int(backup_raw.get("max_backups", 0)),
+        backup_before_overwrite=_bool_value(backup_raw, "backup_before_overwrite", True, "backup.backup_before_overwrite"),
+        retention_days=_int_value(backup_raw, "retention_days", 30, "backup.retention_days"),
+        max_backups=_int_value(backup_raw, "max_backups", 0, "backup.max_backups"),
         compression=str(backup_raw.get("compression", "none")).strip().lower(),
     )
 
-    filters = FiltersConfig(exclude_globs=list(filters_raw.get("exclude_globs", [])))
-    targets = TargetsConfig(include_roots=list(targets_raw.get("include_roots", [])))
+    filters = FiltersConfig(exclude_globs=_string_list(filters_raw, "exclude_globs", "filters.exclude_globs"))
+    targets = TargetsConfig(
+        include_roots=_string_list(targets_raw, "include_roots", "targets.include_roots"),
+        listed="include_roots" in targets_raw,
+    )
     conflict = ConflictConfig(
         policy=conflict_raw.get("policy", "manual_abort"),
-        report_conflicts=bool(conflict_raw.get("report_conflicts", True)),
+        report_conflicts=_bool_value(conflict_raw, "report_conflicts", True, "conflict.report_conflicts"),
     )
     state = StateConfig(
         manifest_file=_to_path(
@@ -275,7 +302,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
             workspace_root=workspace_root_dir,
             required=False,
         ),
-        data_version=int(state_raw.get("data_version", 1)),
+        data_version=_int_value(state_raw, "data_version", 1, "state.data_version"),
     )
 
     log_file = logging_raw.get("file")
@@ -288,10 +315,10 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
             workspace_root=workspace_root_dir,
             required=False,
         ),
-        format=logging_raw.get("format", "text"),
-        retention_days=int(logging_raw.get("retention_days", 7)),
+        format=str(logging_raw.get("format", "text")),
+        retention_days=_int_value(logging_raw, "retention_days", 7, "logging.retention_days"),
         archive_mode=str(logging_raw.get("archive_mode", "zip")).strip().lower(),
-        max_file_size_mb=int(logging_raw.get("max_file_size_mb", 10)),
+        max_file_size_mb=_int_value(logging_raw, "max_file_size_mb", 10, "logging.max_file_size_mb"),
         machine_id=identity.machine_id,
     )
 
@@ -311,11 +338,82 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         path_mappings=_parse_path_mappings(path_mappings_raw),
         semantic=semantic,
         scheduler=_parse_scheduler(scheduler_raw),
+        state_backup=_parse_state_backup(
+            state_backup_raw, base_dir=base_dir, workspace_root=workspace_root_dir
+        ),
     )
     _validate_config(cfg)
     if "guardian" in raw:
         _require_guardian_identity(cfg)
     return cfg
+
+
+def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
+    value = raw.get(name, {})
+    if not isinstance(value, dict):
+        raise ConfigError(f"{name} must be a table")
+    return value
+
+
+def _int_value(section: dict[str, Any], key: str, default: int, field_name: str) -> int:
+    """An integer setting, or a `ConfigError` naming it (CS-319).
+
+    A bare `int(...)` turned `retention_days = "a week"` into a `ValueError`
+    and exit 1, and `2.9` into 2 without a word. A quoted whole number is still
+    accepted, because earlier versions accepted it.
+    """
+    value = section.get(key, default)
+    if isinstance(value, bool):
+        raise ConfigError(f"{field_name} must be an integer, not {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            pass
+    raise ConfigError(f"{field_name} must be an integer, not {value!r}")
+
+
+def _bool_value(section: dict[str, Any], key: str, default: bool, field_name: str) -> bool:
+    """A true/false setting written as TOML `true`/`false` (CS-319).
+
+    `bool("false")` is True: a quoted `backup_before_overwrite = "false"` or
+    `require_codex_stopped = "false"` meant the opposite of what it said, with
+    no error. Anything but a real boolean is refused and named.
+    """
+    value = section.get(key, default)
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(f"{field_name} must be true or false without quotes, not {value!r}")
+
+
+def _float_value(section: dict[str, Any], key: str, default: float, field_name: str) -> float:
+    value = section.get(key, default)
+    if isinstance(value, bool):
+        raise ConfigError(f"{field_name} must be a number, not {value!r}")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            pass
+    raise ConfigError(f"{field_name} must be a number, not {value!r}")
+
+
+def _string_list(section: dict[str, Any], key: str, field_name: str) -> list[str]:
+    """A list of strings. A lone string is refused rather than read letter by letter.
+
+    `list("**/*.lock")` is ``["*", "*", "/", ...]``: every glob character
+    became an exclusion of its own, and the one the user wrote was lost.
+    """
+    value = section.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(f"{field_name} must be a list of strings, for example [\"a\", \"b\"]")
+    return list(value)
 
 
 def _parse_scheduler(raw: Any) -> SchedulerConfig:
@@ -343,6 +441,67 @@ def _parse_scheduler(raw: Any) -> SchedulerConfig:
     )
 
 
+def _parse_state_backup(raw: Any, *, base_dir: Path, workspace_root: Path | None) -> StateBackupConfig:
+    """Read `[state_backup]` (CS-276). An empty or absent `root_dir` means none.
+
+    No folder is ever proposed here: where copies of a whole working state go
+    is the user's decision, and a default would have put them somewhere nobody
+    chose -- possibly into a cloud folder that uploads every copy.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError("state_backup must be a table")
+    defaults = StateBackupConfig()
+    root_value = raw.get("root_dir", "")
+    if not isinstance(root_value, str):
+        raise ConfigError("state_backup.root_dir must be a string path")
+    return StateBackupConfig(
+        root_dir=_to_path(
+            root_value.strip(), "state_backup.root_dir",
+            base_dir=base_dir, workspace_root=workspace_root, required=False,
+        ),
+        at_login=raw.get("at_login", defaults.at_login),
+        interval_hours=raw.get("interval_hours", defaults.interval_hours),
+        keep=raw.get("keep", defaults.keep),
+    )
+
+
+def _validate_state_backup(cfg: AppConfig) -> None:
+    settings = cfg.state_backup
+    if not isinstance(settings.at_login, bool):
+        raise ConfigError("state_backup.at_login must be a boolean (true or false, without quotes)")
+    for field_name, value, minimum, maximum in (
+        ("state_backup.interval_hours", settings.interval_hours, 0, MAX_STATE_BACKUP_INTERVAL_HOURS),
+        ("state_backup.keep", settings.keep, 1, 1000),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"{field_name} must be an integer")
+        if not minimum <= value <= maximum:
+            raise ConfigError(f"{field_name} must be between {minimum} and {maximum}")
+    root = settings.root_dir
+    if root is None:
+        if settings.scheduled:
+            raise ConfigError(
+                "state_backup.root_dir is empty: choose the folder for copies of the Codex state "
+                "before switching on at_login or interval_hours"
+            )
+        return
+    resolved = root.resolve()
+    if cfg.paths.local_state_dir and _paths_overlap(resolved, cfg.paths.local_state_dir.resolve()):
+        raise ConfigError("state_backup.root_dir must be outside paths.local_state_dir")
+    # Each of these has an owner that prunes, sweeps, mirrors or snapshots it:
+    # backups are deleted by age, temp is swept, the cloud mirror is synced
+    # file by file, and the Guardian and semantic stores have their own rules.
+    for field_name, protected in (
+        ("paths.backup_dir", cfg.paths.backup_dir),
+        ("paths.temp_dir", cfg.paths.temp_dir),
+        ("paths.cloud_root_dir", cfg.paths.cloud_root_dir),
+        ("guardian.root_dir", cfg.guardian.root_dir),
+        ("semantic.root_dir", cfg.semantic.root_dir),
+    ):
+        if _paths_overlap(resolved, protected.resolve()):
+            raise ConfigError(f"state_backup.root_dir must not overlap {field_name}")
+
+
 def _validate_scheduler(scheduler: SchedulerConfig) -> None:
     for field_name, value in (
         ("scheduler.enabled", scheduler.enabled),
@@ -366,7 +525,17 @@ def _validate_scheduler(scheduler: SchedulerConfig) -> None:
         if isinstance(value, bool) or not isinstance(value, int):
             raise ConfigError(f"{field_name} must be an integer")
         if value < minimum:
+            if field_name == "scheduler.interval_seconds":
+                raise ConfigError(
+                    f"scheduler.interval_seconds must be >= {minimum} (5 minutes); "
+                    "`codexsync config upgrade` raises a shorter period to it"
+                )
             raise ConfigError(f"{field_name} must be >= {minimum}")
+    if scheduler.interval_seconds > MAX_SCHEDULER_INTERVAL_SECONDS:
+        raise ConfigError(
+            f"scheduler.interval_seconds must be <= {MAX_SCHEDULER_INTERVAL_SECONDS} (31 days, "
+            "the longest interval the OS scheduler repeats a task at)"
+        )
 
 
 def _validate_config(cfg: AppConfig) -> None:
@@ -446,7 +615,12 @@ def _validate_config(cfg: AppConfig) -> None:
                 raise ConfigError(f"{field_name} must be outside paths.local_state_dir")
         if cfg.state.manifest_file and _paths_overlap(local_root, cfg.state.manifest_file.resolve()):
             raise ConfigError("state.manifest_file must be outside paths.local_state_dir")
+        if cfg.logging.file and _paths_overlap(local_root, cfg.logging.file.resolve()):
+            raise ConfigError("logging.file must be outside paths.local_state_dir")
 
+    _validate_owned_paths_apart(cfg)
+    _validate_include_roots(cfg.targets.include_roots, listed=cfg.targets.listed)
+    _validate_scalar_ranges(cfg)
     _validate_guardian_root(cfg)
     if not 1 * 1024 * 1024 <= cfg.guardian.max_state_bytes <= 1 * 1024 * 1024 * 1024:
         raise ConfigError("guardian.max_state_bytes must be between 1 MiB and 1 GiB")
@@ -474,6 +648,7 @@ def _validate_config(cfg: AppConfig) -> None:
         if value <= 0:
             raise ConfigError(f"{field_name} must be > 0")
     _validate_scheduler(cfg.scheduler)
+    _validate_state_backup(cfg)
     if cfg.semantic.max_jsonl_line_bytes < 1024 * 1024:
         raise ConfigError("semantic.max_jsonl_line_bytes must be at least 1 MiB")
     semantic_root = cfg.semantic.root_dir.resolve()
@@ -482,6 +657,70 @@ def _validate_config(cfg: AppConfig) -> None:
     for field_name, protected in (("paths.backup_dir", cfg.paths.backup_dir), ("paths.temp_dir", cfg.paths.temp_dir), ("guardian.root_dir", cfg.guardian.root_dir)):
         if _paths_overlap(semantic_root, protected.resolve()):
             raise ConfigError(f"semantic.root_dir must not overlap {field_name}")
+
+
+def _validate_owned_paths_apart(cfg: AppConfig) -> None:
+    """The mirror, the backups, the temp folder and the manifest never nest (CS-290).
+
+    Each has an owner that deletes from it on its own schedule: backups are
+    pruned by age, temp is swept, the mirror is synchronised file by file. A
+    backup folder that was the mirror had its `sessions/` removed as an "old
+    snapshot"; a manifest inside the backups was pruned with them.
+    """
+    owned: list[tuple[str, Path]] = [
+        ("paths.cloud_root_dir", cfg.paths.cloud_root_dir),
+        ("paths.backup_dir", cfg.paths.backup_dir),
+        ("paths.temp_dir", cfg.paths.temp_dir),
+    ]
+    if cfg.state.manifest_file:
+        owned.append(("state.manifest_file", cfg.state.manifest_file))
+    for index, (first_name, first) in enumerate(owned):
+        for second_name, second in owned[index + 1:]:
+            if _paths_overlap(first.resolve(), second.resolve()):
+                raise ConfigError(f"{first_name} and {second_name} must not overlap")
+
+
+def _validate_include_roots(include_roots: list[str], *, listed: bool) -> None:
+    """Every root names something *inside* the state directory (CS-289).
+
+    An empty list, ``""`` or ``"."`` used to mean "everything", and everything
+    includes `auth.json`. Clearing the list in Settings wrote exactly that.
+    A config without the key (one used only for Guardian, say) still loads;
+    it synchronises nothing, `sync` refuses with "nothing to synchronise", and
+    `validate` says so up front.
+    """
+    if listed and not include_roots:
+        raise ConfigError(
+            "targets.include_roots must name at least one folder or file to synchronise; "
+            "an empty list would synchronise the whole Codex state directory, credentials included"
+        )
+    for root in include_roots:
+        text = root.strip()
+        parts = [part for part in text.replace("\\", "/").split("/") if part not in ("", ".")]
+        if not parts:
+            raise ConfigError(
+                f"targets.include_roots entry {root!r} names the whole state directory; "
+                "list the folders and files to synchronise instead"
+            )
+        if Path(text).is_absolute() or text.startswith(("/", "\\")) or ".." in parts:
+            raise ConfigError(f"targets.include_roots must be relative paths inside the state directory: {root!r}")
+
+
+def _validate_scalar_ranges(cfg: AppConfig) -> None:
+    level = cfg.logging.level
+    if not isinstance(level, str) or level.strip().upper() not in _LOG_LEVELS:
+        raise ConfigError("logging.level must be one of: " + ", ".join(_LOG_LEVELS))
+    for field_name, value in (
+        ("process_detection.grace_period_seconds", cfg.process_detection.grace_period_seconds),
+        ("backup.retention_days", cfg.backup.retention_days),
+        ("backup.max_backups", cfg.backup.max_backups),
+    ):
+        if value < 0:
+            raise ConfigError(f"{field_name} must be >= 0")
+
+
+#: What `logging.level` may name; anything else used to become INFO silently.
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
 def _require_guardian_identity(cfg: AppConfig) -> str:
@@ -535,6 +774,40 @@ def _parse_path_mappings(raw: Any) -> list[PathMappingRule]:
             item["from"], item["to"], case_sensitive,
         ))
     return result
+
+
+def external_roots(cfg: AppConfig) -> list[tuple[str, Path]]:
+    """Every folder or file codexSync writes that must never sit in or around `.codex`."""
+    roots: list[tuple[str, Path]] = [
+        ("paths.cloud_root_dir", cfg.paths.cloud_root_dir),
+        ("paths.backup_dir", cfg.paths.backup_dir),
+        ("paths.temp_dir", cfg.paths.temp_dir),
+        ("guardian.root_dir", cfg.guardian.root_dir),
+        ("semantic.root_dir", cfg.semantic.root_dir),
+    ]
+    if cfg.state.manifest_file:
+        roots.append(("state.manifest_file", cfg.state.manifest_file))
+    if cfg.state_backup.root_dir is not None:
+        roots.append(("state_backup.root_dir", cfg.state_backup.root_dir))
+    if cfg.logging.file:
+        roots.append(("logging.file", cfg.logging.file))
+    return roots
+
+
+def require_outside_state_dir(cfg: AppConfig, state_dir: Path) -> None:
+    """Refuse a config whose own folders overlap the Codex state folder in use.
+
+    Loading compares them with `paths.local_state_dir` as configured. When that
+    folder does not exist the locator falls back to CODEX_HOME or ~/.codex,
+    which loading never saw -- so every command checks again against the
+    folder it actually found, before it reads or writes anything.
+    """
+    resolved = state_dir.resolve()
+    for field_name, root in external_roots(cfg):
+        if _paths_overlap(root.resolve(), resolved):
+            raise ConfigError(
+                f"{field_name} ({root}) must be outside the Codex state folder in use ({state_dir})"
+            )
 
 
 def _paths_overlap(first: Path, second: Path) -> bool:

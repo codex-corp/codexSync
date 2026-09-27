@@ -99,6 +99,15 @@ Two properties keep it honest:
 `validate`, `doctor` and the run report state the direction, so a run that
 copied nothing in one direction says why.
 
+Amendment (CS-288): "the manifest" is one baseline per machine. The file lives
+in the shared workspace, and a single two-sided entry made machine B take
+machine A's last sync for its own and copy its older file over A's newer one.
+Each machine now reads and writes only its own pair (local and cloud as *it*
+saw them); a skipped path carries this machine's previous entry. An entry from
+the unkeyed pre-0.2 format is attributed to nobody, which makes the first run
+after the upgrade a first sync. Any conflict left in a plan stops the run,
+whatever `conflict.policy` is (CS-295).
+
 ## D-013: Deletions may be propagated, but only against proof
 `sync.delete_policy` accepts `never` (the default) and `propagate`.
 
@@ -121,6 +130,13 @@ The safety rules are unchanged and apply in full (`AI_RULES` 3 and 6):
   the global state, SQLite) are never deleted by `sync`. Moving a session to
   the archive is a separate question (`ARCHIVE_TRANSITION`) and this setting
   does not open it.
+
+Amendment (CS-288, CS-324): the proof is this machine's own baseline, never
+another machine's, so an entry the other machine wrote cannot delete a file
+here. And a deletion out of an include root that holds no file at all on the
+side it went missing from is a conflict: an empty or missing root is far more
+likely a folder being re-downloaded or a disconnected drive than a person
+deleting each file. Paths that differ only in letter case are a conflict too.
 
 ## D-014: A person may accept a suspicious shrink as Guardian's new baseline
 Guardian quarantines a state whose project or binding count fell sharply
@@ -216,3 +232,43 @@ What was decided (2026-09-23, by the owner):
 - Installing it must not run it: the Windows logon trigger and systemd's
   `OnStartupSec` do not fire at install, and the LaunchAgent is written but not
   bootstrapped, since loading it would fire `RunAtLoad`.
+
+## D-017: A copy of `.codex` may be taken on a schedule, and it waits for Codex
+Asked for on 2026-09-24 as "automation of backups", and specified by the owner
+on 2026-09-25: a copy of the Codex state at sign-in and/or on a timer, which
+waits when Codex is open rather than copying it while it runs.
+
+What was decided:
+
+- It is a new, separate job (`state-backup create --wait`) in a task of its own
+  (`STATE_BACKUP_SLOT`), not a periodic `[scheduler]` mode and not a variant of
+  the pre-overwrite backups, which exist only inside a write.
+- It reads `.codex` and writes only into `[state_backup] root_dir`, which the
+  user chooses; nothing proposes a location (a cloud folder would upload every
+  copy). Empty means off, and a schedule without a folder is a config error.
+- What is copied is the valuable part — sessions, archive, global state and its
+  `.bak`, the SQLite catalogues with `-wal`/`-shm`, the session index,
+  `config.toml`, `AGENTS.md`, rules, skills, memories, automations. Secrets are
+  refused by name at any depth (`sync_candidates.SECRET_NAMES`); caches, logs,
+  the sandbox and temporaries are left out.
+- It goes through the safety gate as `OperationKind.STATE_BACKUP`, which needs
+  Codex stopped without being a mutation: a copy of files being written is a
+  copy of no moment. The task waits (30 s polls, up to 23 h, under a 24 h OS
+  limit); the window and `create` without `--wait` refuse instead. A file whose
+  size or mtime moves while it is read fails the copy, and the gate is asked
+  again before the copy is committed.
+- One verified zip per copy, written as `.partial` and renamed only after every
+  entry reads back with the hash it was written with. Only this machine's copies
+  beyond `keep` (zip, keep 5 by default) are removed, only by the exact name
+  pattern, and only after the new copy is committed.
+- Restoring from a copy is by hand. A restore into `.codex` would be a mutation
+  with its own plan and confirmation, and none was asked for.
+
+Amendment (2026-09-27, review CS-301): Codex's own `config.toml` stays in the
+copy, by the owner's decision. It can hold MCP server tokens (`env` tables,
+bearer headers), which `SECRET_NAMES` cannot see because it works by file name;
+leaving it out would lose the one file that says how Codex was set up, and
+filtering its keys would be a guess about a format codexSync does not own. The
+risk is accepted and written in the user documentation: the copy folder must
+be private. Links (symlinks and junctions) are not followed, and a folder that
+cannot be listed fails the copy rather than leaving a hole in it.

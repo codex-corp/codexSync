@@ -20,7 +20,9 @@ from unittest import mock
 from codexsync.cli import main
 from codexsync.exceptions import ConflictError, FailSafeError, GuardianBusyError
 from codexsync.guardian_accept import (
+    BASELINE_SCHEMA_CHANGED,
     NO_BASELINE,
+    SCHEMA_CHANGE_ACCEPTED,
     NOTHING_TO_ACCEPT,
     SHRINK_ACCEPTED,
     SOURCE_MISSING,
@@ -29,7 +31,13 @@ from codexsync.guardian_accept import (
 )
 from codexsync.guardian_lock import GuardianRunnerLock
 from codexsync.guardian_manifest import load_guardian_manifest
-from codexsync.guardian_models import GuardianConfig, GuardianResultStatus, ValidationStatus
+from codexsync.guardian_models import (
+    GuardianConfig,
+    GuardianResultStatus,
+    SourceObservation,
+    ValidationReport,
+    ValidationStatus,
+)
 from codexsync.guardian_pointer import resolve_or_restore_latest_good
 from codexsync.guardian_retention import prune_snapshots
 from codexsync.guardian_runner import GuardianRunner
@@ -297,6 +305,89 @@ class GuardianAcceptTests(unittest.TestCase):
         self.assertNotIn(accepted.snapshot_id, removed)
         self.assertTrue(baseline.directory.is_dir())
         self.assertTrue(accepted.directory.is_dir())
+
+
+class GuardianSchemaChangeAcceptTests(unittest.TestCase):
+    """CS-312: a new schema adapter must not freeze latest-good for good.
+
+    The watcher cannot compare a state with a baseline in another schema, so
+    it holds every state back as INDETERMINATE -- and only a person can say the
+    change is real. The same limits as a shrink apply: never a damaged state.
+    """
+
+    setUp = GuardianAcceptTests.setUp
+    tearDown = GuardianAcceptTests.tearDown
+    _runner = GuardianAcceptTests._runner
+    _write = GuardianAcceptTests._write
+
+    LEGACY = json.dumps({"local-projects": {"a": {"root": "C:/a"}}, "project-order": ["a"]}).encode("utf-8")
+
+    def _schema_stuck_store(self):
+        self._write(self.LEGACY)
+        first = self._runner().once()
+        self.assertEqual(first.status, GuardianResultStatus.COMMITTED)
+        self._write(RECREATED)
+        held = self._runner().once()
+        self.assertEqual(held.status, GuardianResultStatus.QUARANTINED)
+        assert held.result is not None and held.result.validation is not None
+        self.assertEqual(held.result.validation.status, ValidationStatus.INDETERMINATE)
+        assert first.result is not None and first.result.snapshot is not None
+        return first.result.snapshot
+
+    def test_a_valid_state_in_another_schema_can_be_accepted(self) -> None:
+        baseline = self._schema_stuck_store()
+
+        plan = self._runner().preview_accept()
+
+        self.assertEqual(plan.codes, ())
+        self.assertEqual(plan.shrink_codes, (BASELINE_SCHEMA_CHANGED,))
+        self.assertEqual(plan.baseline_snapshot_id, baseline.snapshot_id)
+        _, snapshot = self._runner().accept(confirm_plan=plan.plan_id)
+
+        manifest = load_guardian_manifest(snapshot.manifest_path)
+        self.assertEqual(manifest.validation_status, ValidationStatus.PASS_WITH_WARNING)
+        self.assertEqual(manifest.validation_codes[-1], SCHEMA_CHANGE_ACCEPTED)
+        self.assertEqual(manifest.schema_id, "electron-v2")
+        self.assertEqual(manifest.previous_good_snapshot_id, baseline.snapshot_id)
+        self.assertEqual(resolve_or_restore_latest_good(self.config.root_dir, "machine-a"), snapshot)
+        # The watcher compares like with like again.
+        self._write(_state({"n1": "C:/a", "n2": "C:/b", "n3": "C:/c"}, {"t9": "n1", "t8": "n2"}))
+        self.assertEqual(self._runner().once().status, GuardianResultStatus.COMMITTED)
+        # And the overridden baseline outlives retention like any decision's.
+        removed = prune_snapshots(
+            self.config.root_dir, "machine-a", retention_days=1, max_snapshots=1,
+            now=datetime.now(timezone.utc) + timedelta(days=400),
+        )
+        self.assertNotIn(baseline.snapshot_id, removed)
+
+    def test_a_baseline_that_predates_schema_ids_can_be_accepted_over(self) -> None:
+        payload = self.LEGACY
+        observation = SourceObservation(payload, ".codex-global-state.json", len(payload), len(payload), 1, 1, None, None, True)
+        old = self.store.commit(observation, ValidationReport(ValidationStatus.PASS, project_count=1, binding_count=0))
+        assert old.snapshot is not None
+        self._write(RECREATED)
+
+        plan = self._runner().preview_accept()
+
+        self.assertEqual((plan.codes, plan.shrink_codes), ((), (BASELINE_SCHEMA_CHANGED,)))
+
+    def test_an_unrecognised_state_is_still_refused(self) -> None:
+        self._schema_stuck_store()
+        self._write(json.dumps({"local-projects": [], "project-order": []}).encode("utf-8"))
+
+        plan = self._runner().preview_accept()
+
+        self.assertEqual(plan.codes, (STATE_REJECTED,))
+        with self.assertRaises(ConflictError):
+            self._runner().accept(confirm_plan=plan.plan_id)
+
+    def test_the_plan_id_pins_both_schemas(self) -> None:
+        self._schema_stuck_store()
+        first = self._runner().preview_accept()
+        self._write(RECREATED + b" ")
+        self.assertEqual(self._runner().preview_accept().plan_id, first.plan_id)
+        self._write(_state({"n1": "C:/a"}, {}))
+        self.assertNotEqual(self._runner().preview_accept().plan_id, first.plan_id)
 
 
 class GuardianAcceptCliTests(unittest.TestCase):

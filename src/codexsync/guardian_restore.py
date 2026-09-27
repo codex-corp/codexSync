@@ -44,7 +44,7 @@ from .guardian_models import (
     require_guardian_machine_id,
 )
 from .guardian_pointer import _verify_candidate
-from .guardian_schema import validate_global_state_references
+from .guardian_schema import UNKNOWN_SCHEMA, validate_global_state_references
 from .guardian_store import _verify_committed_marker
 
 
@@ -69,6 +69,13 @@ SCHEMA_CHANGED = "SCHEMA_CHANGED"
 #: putting the snapshot back would hand the runtime ids it no longer knows and
 #: drop every project it knows now. Not a damaged state to repair: another one.
 PROJECT_IDS_REPLACED = "PROJECT_IDS_REPLACED"
+#: The live state is well-formed JSON that carries project state -- projects,
+#: their order or thread bindings -- in a shape no schema adapter recognises.
+#: That is what a newer desktop build writes before codexSync learns its shape,
+#: not damage: putting an older shape back would hand that build a file it may
+#: not read. Damaged bytes (invalid UTF-8 or JSON) and a document with no
+#: project state at all remain restorable (CS-325).
+LIVE_SCHEMA_UNKNOWN = "LIVE_SCHEMA_UNKNOWN"
 
 _RESTORABLE = frozenset({ValidationStatus.PASS, ValidationStatus.PASS_WITH_WARNING})
 
@@ -120,13 +127,20 @@ def build_guardian_restore_plan(
     projects_now: int | None = None
     bindings_now: int | None = None
     schema_now: str | None = None
+    live_unrecognised = False
     if current_state is not None:
-        # Counts only. A broken or unrecognised live state is precisely what a
-        # restore exists to replace, so its status never becomes a code.
+        # Counts only. A broken live state is precisely what a restore exists
+        # to replace, so its status never becomes a code -- except when it is
+        # a sound document in a shape nobody recognises (LIVE_SCHEMA_UNKNOWN).
         now_report = validate_global_state_references(current_state)
         projects_now = now_report.project_count
         bindings_now = now_report.binding_count
         schema_now = now_report.schema_id
+        live_unrecognised = (
+            schema_now is None
+            and UNKNOWN_SCHEMA in now_report.codes
+            and _carries_project_state(current_state)
+        )
 
     root = root_dir.resolve()
     manifest, payload, code = _load_verified_snapshot(root, machine, snapshot_id)
@@ -145,6 +159,8 @@ def build_guardian_restore_plan(
             # would roll it back anyway — after a backup and a replace.
             codes.append(SNAPSHOT_INVALID)
             payload = None
+        elif live_unrecognised:
+            codes.append(LIVE_SCHEMA_UNKNOWN)
         elif schema_now is not None and schema_id is not None and schema_now != schema_id:
             codes.append(SCHEMA_CHANGED)
         elif current_state is not None:
@@ -294,6 +310,19 @@ def _plan_id(machine: str, snapshot_id: str, snapshot_sha256: str, current_sha25
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+#: Top-level keys that hold project state in every schema seen so far.
+_PROJECT_STATE_KEYS = ("local-projects", "project-order", "thread-project-assignments")
+
+
+def _carries_project_state(payload: bytes) -> bool:
+    """Whether a JSON object names any project-state key. Keys only; no values."""
+    try:
+        state = json.loads(payload.decode("utf-8-sig"))
+    except (UnicodeError, ValueError, RecursionError):
+        return False
+    return isinstance(state, dict) and any(key in state for key in _PROJECT_STATE_KEYS)
 
 
 def _project_ids(payload: bytes) -> set[str]:

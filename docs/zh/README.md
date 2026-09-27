@@ -15,7 +15,7 @@
 | [项目与对话](PROJECTS.md) | 对话归属、换机之后的修复、搬移项目 |
 | [备份与恢复](RECOVERY.md) | 备份、还原、被中断的写操作 |
 
-[![CodexSync 窗口](../screenshots/zh/01-overview.png)](GUI.md)
+[![CodexSync 窗口](../screenshots/zh/02-overview.png)](GUI.md)
 
 *覆盖在与命令行相同内核之上的窗口 —— [每个界面及截图](GUI.md)。*
 

@@ -86,9 +86,20 @@ def _module_codes(path: Path) -> set[str]:
     return codes
 
 
+#: Screens that edit config.toml fields (`Field(...)`): Settings, and
+#: Automation since CS-276 moved `[scheduler]` there and added `[state_backup]`.
+FIELD_SCREENS = ("settings.py", "automation.py")
+
+
 def _settings_fields() -> list[tuple[str, str, str, tuple[str, ...]]]:
-    """(section, key, kind, choices) for every field the settings screen shows."""
-    tree = ast.parse((GUI / "screens" / "settings.py").read_text(encoding="utf-8"))
+    """(section, key, kind, choices) for every field a config screen shows."""
+    fields = []
+    for name in FIELD_SCREENS:
+        fields += _fields_in(ast.parse((GUI / "screens" / name).read_text(encoding="utf-8")))
+    return fields
+
+
+def _fields_in(tree: ast.AST) -> list[tuple[str, str, str, tuple[str, ...]]]:
     fields = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Field":
@@ -154,7 +165,9 @@ class CatalogueCompletenessTests(unittest.TestCase):
         sync_screen = GUI / "screens" / "sync.py"
         computed |= {f"sync.history.failure.{name}" for name in _module_constant(sync_screen, "KNOWN_FAILURES")}
         computed |= {f"sync.history.origin.{name}" for name in _module_constant(sync_screen, "ORIGINS")}
-        tabs = ("general", "sync", "protection", "automation", "mappings", "service")
+        tabs = ("general", "sync", "protection", "mappings", "service")
+        computed |= {f"home.{tile}.{part}" for tile in _module_constant(GUI / "screens" / "home.py", "TILES") for part in ("title", "open")}
+        computed |= {f"home.codex.{state}" for state in ("running", "stopped", "unknown")}
         computed |= {f"settings.tab.{tab}" for tab in tabs}
         computed |= {f"settings.tab.{tab}.caption" for tab in tabs}
         for section, key, kind, choices in _settings_fields():

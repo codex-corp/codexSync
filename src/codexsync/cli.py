@@ -13,6 +13,8 @@ from .app import (
     automation_status,
     build_context,
     create_config,
+    create_codex_backup,
+    list_codex_backups,
     apply_project_move_plan,
     apply_repair_projects,
     apply_session_transfer,
@@ -62,6 +64,7 @@ from .guardian_inventory import read_guardian_inventory
 from .logging_setup import configure_logging
 from .models import AppConfig, LoggingConfig
 from .recovery import resume_operation, rollback_operation
+from .app import _UNRESOLVED_TRANSFER_BLOCKS
 from .repair_plan import save_repair_plan
 from .safety_gate import OperationKind
 from .scheduler import render_scheduler_templates, write_scheduler_templates
@@ -306,6 +309,23 @@ def print_automation_status(view: AutomationView) -> None:
             f"  login_task: {login.task_name}; last run {login.last_run_utc or 'never'}; "
             f"last result {login.last_result if login.last_result is not None else 'none'}"
         )
+    print("Copies of the Codex state ([state_backup] in config.toml)")
+    safe_print(f"  root_dir: {view.backup_root if view.backup_root is not None else '(not chosen)'}")
+    print(f"  at_login: {_yes_no(view.backup_at_login)}")
+    print(f"  interval_hours: {view.backup_interval_hours}")
+    print(f"  keep: {view.backup_keep}")
+    safe_print(f"  backup_argv: {json.dumps(list(view.backup_argv), ensure_ascii=False)}")
+    backup = view.backup_status
+    if backup is None:
+        safe_print(f"  backup_task: {view.backup_status_error or 'the scheduler could not be asked'}")
+    elif not backup.installed:
+        print("  backup_task: not installed")
+    else:
+        safe_print(
+            f"  backup_task: {backup.task_name}; last run {backup.last_run_utc or 'never'}; "
+            f"last result {backup.last_result if backup.last_result is not None else 'none'}"
+            + ("" if backup.definition_matches is not False else "; differs from config.toml")
+        )
     print("Operating system task")
     status = view.status
     if status is None:
@@ -389,13 +409,28 @@ def print_automation_run(run: AutomationRun) -> int:
     return int(ExitCode.FAIL_SAFE)
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    """argparse, except that a malformed command line exits 4, not 2.
+
+    argparse reports every usage error with exit status 2, which `AI_RULES`
+    reserves for a conflict: a scheduled task or script reading the code would
+    take `sync --bogus` for "both sides changed" (CS-315). Subparsers inherit
+    the class, so every subcommand's errors take the same door.
+    """
+
+    def error(self, message: str):  # type: ignore[override]
+        self.print_usage(sys.stderr)
+        self.exit(int(ExitCode.BAD_INPUT), f"{self.prog}: error: {message}\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="codexsync", description="codexSync CLI")
+    parser = _ArgumentParser(prog="codexsync", description="codexSync CLI")
     parser.add_argument(
         "-c", "--config", default=None,
         help=(
-            "Path to TOML config. Without it: config.toml here, then beside the "
-            "executable, then the per-user location"
+            "Path to TOML config. Without it: the config the window last opened, "
+            "then config.toml here, then beside the executable; never a location "
+            "nobody created"
         ),
     )
     parser.add_argument(
@@ -433,7 +468,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("validate", help="Validate config only")
+    sub.add_parser(
+        "validate",
+        help="Validate config: it loads, its folders are apart, and mutating commands accept it",
+    )
     for diagnostic_name in ("doctor", "preflight"):
         diagnostic = sub.add_parser(diagnostic_name, help="Run read-only environment diagnostics")
         diagnostic.add_argument(
@@ -548,7 +586,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Plan id from the preview; without it nothing is written",
     )
     guardian_restore.add_argument(
-        "--dry-run", action="store_true", help="Run every check, including the process gate, and write nothing"
+        "--dry-run", action="store_true",
+        help=(
+            "With --confirm: run every check, including the process gate, and write nothing. "
+            "Without --confirm the command is already a preview and checks no gate"
+        ),
     )
     guardian_accept = guardian_sub.add_parser(
         "accept",
@@ -558,7 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
             "comparing later states with the baseline from before the drop. When the drop is "
             "real -- Codex re-created its projects, say -- nothing ever becomes latest-good "
             "again. This shows why the counts fell and, with --confirm, commits the current "
-            "state as latest-good. Only a shrink can be accepted, never a damaged state. "
+            "state as latest-good. Only a shrink or a change of schema can be accepted, never a damaged state. "
             "Allowed while Codex is open; writes only into the Guardian root."
         ),
     )
@@ -704,7 +746,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--association", default=None, choices=[item.value for item in Association])
             command.add_argument("--since", default=None, help="ISO timestamp lower bound")
             command.add_argument("--until", default=None, help="ISO timestamp upper bound")
-            command.add_argument("--limit", type=int, default=50, help="Maximum rows (0 for no limit)")
+            command.add_argument("--limit", type=_non_negative_int, default=50, help="Maximum rows (0 for no limit)")
 
     chats_move = chats_sub.add_parser(
         "move", help="Put chosen chats under one project (needs Codex closed to write)"
@@ -720,11 +762,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chats_move.add_argument(
         "--dry-run", action="store_true",
-        help="Run every check and report the write count without writing",
+        help=(
+            "With --confirm: run every check, including the process gate, and report the write "
+            "count without writing. Without --confirm the command is already a preview"
+        ),
     )
     chats_move.add_argument("--sub-threads", action="store_true", help="Allow naming a spawned thread")
     chats_move.add_argument("--source-machine", default=None)
     chats_move.add_argument("--target-machine", default=None)
+
+    state_backup = sub.add_parser(
+        "state-backup",
+        help="Copies of the valuable part of the Codex state directory ([state_backup] in config.toml)",
+    )
+    state_backup_sub = state_backup.add_subparsers(dest="state_backup_command", required=True)
+    state_backup_create = state_backup_sub.add_parser(
+        "create", help="Take one verified copy now; refused while Codex is open unless --wait is given",
+    )
+    state_backup_create.add_argument(
+        "--wait", action="store_true",
+        help="If Codex is open, wait until it closes (up to 23 hours) instead of refusing",
+    )
+    state_backup_list = state_backup_sub.add_parser("list", help="List the copies in the folder; writes nothing")
+    state_backup_list.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
 
     history = sub.add_parser(
         "history", help="List past mutating runs (sync, sessions, ...) from their journals; writes nothing"
@@ -752,8 +812,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     recover_rollback.add_argument("operation_id")
     recover_rollback.add_argument(
-        "--target", choices=["local", "cloud"], required=True,
-        help="Root the snapshot is restored into; never guessed from the snapshot",
+        "--target", choices=["local", "cloud"], default=None,
+        help=(
+            "Each file goes back to the side its backup recorded. Given, it must be the only side "
+            "the snapshot holds; needed only for a restore snapshot that does not record its side"
+        ),
     )
     recover_rollback_mode = recover_rollback.add_mutually_exclusive_group()
     recover_rollback_mode.add_argument("--dry-run", action="store_true", help="Report only (default)")
@@ -844,6 +907,38 @@ def _warn_about_outdated_config(config_path: Path, command: str) -> None:
 
 
 
+def _non_negative_int(text: str) -> int:
+    """An argparse type for a count where a negative number means nothing.
+
+    `chats list --limit -3` used to slice ``[:-3]`` and drop the last three
+    rows instead of refusing (CS-325).
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
+
+
+def _read_scope_file(path: Path):
+    """A working set the user named with ``--scope-file``, or a refusal.
+
+    `load_session_scope` reads a missing file as an empty set, which is right
+    for the per-pair file nobody has saved yet and wrong here: a typo in the
+    name silently dropped the working set, and the apply then wrote every
+    session into `.codex` (CS-317).
+    """
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise ConfigError(f"--scope-file names no file: {resolved}")
+    try:
+        return load_session_scope(resolved)
+    except (OSError, UnicodeError, ValueError, TypeError, AttributeError) as exc:
+        raise ConfigError(f"--scope-file is not a stored working set: {resolved} ({exc})") from exc
+
+
 def _resolve_config_path(explicit: str | None) -> ConfigChoice:
     """Which config this run works on, and where it was found.
 
@@ -923,6 +1018,11 @@ def _print_history(runs) -> None:
         )
 
 
+#: Commands a scheduled task runs besides `sync`, which also log to
+#: `logging.file` (`system_scheduler._JOB_SUBCOMMANDS`).
+_FILE_LOGGED_ONLY = frozenset({"guardian", "preflight", "state-backup"})
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -941,6 +1041,15 @@ def main(argv: list[str] | None = None) -> int:
             config_path = _require_config_path(config_choice)
         _warn_about_outdated_config(config_path, args.command)
         cfg_for_verbose = None
+        if args.command in _FILE_LOGGED_ONLY:
+            # What a scheduled task runs, with nobody watching its console:
+            # its log file is the only record it leaves (CS-318).
+            try:
+                configure_logging(load_config(config_path).logging, verbose=args.verbose)
+            except ConfigError:
+                pass  # Reported with its exit code by the command itself.
+            except Exception as exc:
+                LOG.warning("File logging setup failed, continue with default logger: %s", exc)
         if args.command in {"plan", "sync", "restore"}:
             try:
                 cfg_for_verbose = load_config(config_path)
@@ -958,7 +1067,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_config_command(args, config_path)
 
         if args.command == "validate":
-            validate_config_only(config_path)
+            for note in validate_config_only(config_path):
+                print(f"Note: {note}")
             print("Config is valid.")
             return int(ExitCode.OK)
 
@@ -1216,10 +1326,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "sessions" and args.sessions_command == "scan":
             # The working set is read first: it decides what may be written
             # into `.codex`, and it is part of the plan id.
-            stored = (
-                load_session_scope(Path(args.scope_file).expanduser().resolve())
-                if args.scope_file else None
-            )
+            stored = _read_scope_file(Path(args.scope_file)) if args.scope_file else None
             projects = tuple(args.project) + (stored.projects if stored else ())
             chats = tuple(args.chat) + (stored.chats if stored else ())
             scope = (
@@ -1286,7 +1393,11 @@ def main(argv: list[str] | None = None) -> int:
                 output.write_text(rendered + "\n", encoding="utf-8", newline="\n")
             if args.save_plan:
                 save_transfer_plan(plan, Path(args.save_plan).expanduser().resolve())
-            return int(ExitCode.CONFLICT_DETECTED if plan.blocked_items else ExitCode.OK)
+            # 2 only for what refuses the whole apply and needs a person's
+            # decision; a layout- or catalogue-blocked branch is left alone by
+            # `sessions apply` and is no conflict (CS-325).
+            unresolved = any(item.action in _UNRESOLVED_TRANSFER_BLOCKS for item in plan.blocked_items)
+            return int(ExitCode.CONFLICT_DETECTED if unresolved else ExitCode.OK)
 
         if args.command == "sessions" and args.sessions_command == "index":
             report = audit_session_index(config_path)
@@ -1398,6 +1509,31 @@ def main(argv: list[str] | None = None) -> int:
                 "finished_at_utc": journal.finished_at_utc,
                 "failure": journal.failure,
             }, sort_keys=True, indent=2))
+            return int(ExitCode.OK)
+
+        if args.command == "state-backup":
+            if args.state_backup_command == "create":
+                result = create_codex_backup(config_path, wait=args.wait)
+                print(f"Copy of the Codex state written: {result.path}")
+                print(f"  files: {result.files}, bytes: {result.bytes}")
+                if result.waited_seconds >= 1:
+                    print(f"  waited for Codex to close: {int(result.waited_seconds)} s")
+                for name in result.pruned:
+                    print(f"  removed old copy: {name}")
+                return int(ExitCode.OK)
+            copies = list_codex_backups(config_path)
+            if args.as_json:
+                print(json.dumps([
+                    {"name": item.name, "path": str(item.path), "machine": item.machine,
+                     "created_utc": item.created_utc, "size": item.size, "own": item.own}
+                    for item in copies
+                ], sort_keys=True, indent=2))
+            elif not copies:
+                print("No copies of the Codex state in the folder.")
+            else:
+                for item in copies:
+                    mark = "" if item.own else "  (another machine)"
+                    print(f"{item.created_utc}  {item.size:>14} B  {item.name}{mark}")
             return int(ExitCode.OK)
 
         if args.command == "history":

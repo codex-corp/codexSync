@@ -313,6 +313,23 @@ class GuiExeDispatchTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertEqual(self._dispatch(argv), "gui")
 
+    def test_help_and_version_are_answered_by_the_cli(self) -> None:
+        """CS-325: the window's parser knows neither, so they exited 2 with no window."""
+        for argv in (["--version"], ["-V"], ["--help"], ["-h"], ["-c", "x.toml", "--version"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(self._dispatch(argv), "cli")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.entry.main(["--version"], gui_main=lambda args: 0)
+        self.assertEqual(code, 0)
+        self.assertIn("codexsync", out.getvalue())
+
+    def test_a_malformed_cli_command_exits_four_through_the_exe(self) -> None:
+        """CS-315: argparse's own status 2 would read as a conflict."""
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = self.entry.main(["-c", "x.toml", "sync", "--bogus"], gui_main=lambda args: 0)
+        self.assertEqual(code, 4)
+
     def test_every_cli_command_name_is_recognised_from_the_parser(self) -> None:
         parser = build_parser()
         commands = next(

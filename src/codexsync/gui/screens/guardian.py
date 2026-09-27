@@ -20,7 +20,7 @@ so it is allowed while Codex is open, and it cannot accept a damaged state.
 from __future__ import annotations
 
 from ..controller import Outcome
-from ..widgets import Banner, Cell, button, card, command, fill_table, label, row, selected_data, set_tone, table
+from ..widgets import Banner, Cell, button, card, command, fill_table, human_size, label, row, selected_data, set_tone, table
 from .base import Model, Screen
 
 #: Plan codes that mean "Guardian will manage by itself", shown without alarm.
@@ -238,6 +238,11 @@ class GuardianScreen(Screen):
 
         def apply(model: GuardianModel, outcome: Outcome) -> None:
             model.restore_busy = False
+            if not outcome.ok:
+                # Only when the job itself broke (`_Job.outcome`); a refusal
+                # from the core arrives as ``done``.
+                model.restore_result = outcome
+                return
             done, listing = outcome.value
             model.restore_result = done
             if done.ok and dry_run:
@@ -297,6 +302,9 @@ class GuardianScreen(Screen):
 
         def apply(model: GuardianModel, outcome: Outcome) -> None:
             model.accept_busy = False
+            if not outcome.ok:
+                model.accept_result = outcome
+                return
             done, listing = outcome.value
             model.accept_result = done
             if done.ok:
@@ -462,7 +470,7 @@ class GuardianScreen(Screen):
                     Cell(str(snap.project_count)),
                     Cell(str(snap.binding_count)),
                     Cell(snap.schema_id or "—", muted=True),
-                    Cell(_size(snap.size)),
+                    Cell(human_size(snap.size)),
                     Cell(snap.snapshot_id, muted=True),
                 ])
             self.snapshots.blockSignals(True)
@@ -476,7 +484,7 @@ class GuardianScreen(Screen):
                 [
                     Cell(_when(item.created_at_utc) if item.created_at_utc else "—"),
                     Cell(", ".join(self._reason(code) for code in item.reason_codes), tone="attention", tooltip=", ".join(item.reason_codes)),
-                    Cell(_size(item.size) if item.size is not None else "—"),
+                    Cell(human_size(item.size) if item.size is not None else "—"),
                     Cell(item.event_id, muted=True),
                 ]
                 for item in inventory.quarantine
@@ -515,13 +523,3 @@ def _when(iso: str) -> str:
 
 def _count(value: int | None) -> str:
     return "?" if value is None else str(value)
-
-
-def _size(size: int) -> str:
-    units = ("B", "KiB", "MiB", "GiB")
-    value = float(size)
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-        value /= 1024
-    return str(size)

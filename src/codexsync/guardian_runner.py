@@ -75,6 +75,7 @@ class GuardianRunner:
         self._last_signature = None
         self._missing_reported = False
         self._backoff_seconds = 1.0
+        self._store_backoff_seconds = 1.0
 
     def once(self, *, timeout_seconds: float | None = None) -> GuardianRunOutcome:
         """One complete pipeline; used by watch startup and snapshot --once."""
@@ -93,40 +94,76 @@ class GuardianRunner:
     def watch(self, *, should_stop: Callable[[], bool] | None = None) -> GuardianRunOutcome:
         should_stop = should_stop or (lambda: False)
         try:
-            with GuardianRunnerLock(self.store.root_dir, self.store.machine_id):
-                self._verify_store()
-                initial = self._process_candidate(deadline=None, debounce=False)
-                last_outcome = initial
-                self.state = GuardianRunnerState.IDLE
-                fallback_due = self._monotonic() + self.config.fallback_scan_seconds
-                while not should_stop():
-                    self._sleep(self.config.poll_interval_seconds)
-                    if should_stop():
-                        break
-                    try:
-                        signature = self.reader.signature()
-                    except SourceUnstableError:
-                        last_outcome = self._backoff("source metadata is unavailable")
-                        continue
-                    now = self._monotonic()
-                    if signature != self._last_signature:
-                        last_outcome = self._process_candidate(deadline=None, debounce=True)
-                        fallback_due = self._monotonic() + self.config.fallback_scan_seconds
-                    elif now >= fallback_due:
-                        # A complete re-read catches replacements that preserve
-                        # mtime/size/file identity or a missed filesystem event.
-                        self._verify_store()
-                        last_outcome = self._process_candidate(deadline=None, debounce=True)
-                        fallback_due = self._monotonic() + self.config.fallback_scan_seconds
-                    else:
-                        self._backoff_seconds = 1.0
-                self.state = GuardianRunnerState.STOPPING
-                return last_outcome
+            lock = GuardianRunnerLock(self.store.root_dir, self.store.machine_id).acquire()
         except GuardianBusyError:
             return GuardianRunOutcome(GuardianResultStatus.BUSY, GuardianRunnerState.STOPPING, "active Guardian watcher")
+        try:
+            return self._watch_locked(should_stop)
         except KeyboardInterrupt:
             self.state = GuardianRunnerState.STOPPING
             return GuardianRunOutcome(GuardianResultStatus.UNCHANGED, self.state, "stopped by user")
+        finally:
+            lock.release()
+
+    def _watch_locked(self, should_stop: Callable[[], bool]) -> GuardianRunOutcome:
+        last_outcome = self._survive(lambda: self._verify_and_process(debounce=False))
+        if self.state is not GuardianRunnerState.BACKOFF:
+            self.state = GuardianRunnerState.IDLE
+        fallback_due = self._monotonic() + self.config.fallback_scan_seconds
+        while not should_stop():
+            self._sleep(self.config.poll_interval_seconds)
+            if should_stop():
+                break
+            try:
+                signature = self.reader.signature()
+            except SourceUnstableError:
+                last_outcome = self._backoff("source metadata is unavailable")
+                continue
+            now = self._monotonic()
+            if signature != self._last_signature:
+                last_outcome = self._survive(lambda: self._process_candidate(deadline=None, debounce=True))
+                fallback_due = self._monotonic() + self.config.fallback_scan_seconds
+            elif now >= fallback_due:
+                # A complete re-read catches replacements that preserve
+                # mtime/size/file identity or a missed filesystem event.
+                last_outcome = self._survive(lambda: self._verify_and_process(debounce=True))
+                fallback_due = self._monotonic() + self.config.fallback_scan_seconds
+            else:
+                self._backoff_seconds = 1.0
+        self.state = GuardianRunnerState.STOPPING
+        return last_outcome
+
+    def _verify_and_process(self, *, debounce: bool) -> GuardianRunOutcome:
+        self._verify_store()
+        return self._process_candidate(deadline=None, debounce=debounce)
+
+    def _survive(self, step: Callable[[], GuardianRunOutcome]) -> GuardianRunOutcome:
+        """Run one watch step; a store failure costs the step, not the watcher.
+
+        A cloud client holding a file, a full disk or a snapshot another
+        writer is committing all surface as ``OSError`` or a fail-safe error
+        from the store. Before CS-314 either one ended ``watch`` and with it
+        all protection until someone restarted it. The step is logged, backed
+        off with the injected sleep, and the next poll re-reads the source
+        (the signature is forgotten, so an unchanged file is retried too).
+        """
+        try:
+            outcome = step()
+        except (FailSafeError, OSError) as exc:
+            self._last_signature = None
+            self.state = GuardianRunnerState.BACKOFF
+            # Its own doubling: a successful source read resets the read
+            # backoff, and a store that fails after every good read must
+            # still slow down.
+            wait = self._store_backoff_seconds
+            self._store_backoff_seconds = min(60.0, self._store_backoff_seconds * 2.0)
+            LOG.warning(
+                "Guardian store step failed (%s: %s); retrying in %.0fs", type(exc).__name__, exc, wait
+            )
+            self._sleep(wait)
+            return GuardianRunOutcome(GuardianResultStatus.FAILED, self.state, f"{type(exc).__name__}: {exc}")
+        self._store_backoff_seconds = 1.0
+        return outcome
 
     def preview_accept(self) -> GuardianAcceptPlan:
         """What accepting the current state as the new baseline would override.

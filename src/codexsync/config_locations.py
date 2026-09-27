@@ -81,6 +81,24 @@ def pointer_path() -> Path:
     return root / "codexsync" / POINTER_NAME
 
 
+def cache_dir() -> Path:
+    """The application's own cache folder: numbers that are slow to compute.
+
+    Beside the pointer on Windows (`%LOCALAPPDATA%\\CodexSync\\cache`), and in
+    each platform's cache location elsewhere. Local, like the pointer, and
+    nothing in it is needed: a missing or unreadable cache is recomputed.
+    """
+    if sys.platform == "win32":
+        base = os.getenv("LOCALAPPDATA")
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+        return root / "CodexSync" / "cache"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "CodexSync"
+    base = os.getenv("XDG_CACHE_HOME")
+    root = Path(base) if base else Path.home() / ".cache"
+    return root / "codexsync"
+
+
 def read_config_pointer(pointer: Path | None = None) -> Path | None:
     """The config the window last opened, or ``None``.
 
@@ -171,6 +189,7 @@ def frozen_executable_dir() -> Path | None:
 
 __all__ = [
     "CONFIG_NAME",
+    "cache_dir",
     "ConfigChoice",
     "choose_config_path",
     "frozen_executable_dir",

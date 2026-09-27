@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
-from .controller import Outcome
+from .controller import Failure, Outcome
 
 #: A long read reports once per file; the window is redrawn far less often.
 PROGRESS_INTERVAL_MS = 100
@@ -90,7 +90,22 @@ class _Job(QRunnable):
 
     @Slot()
     def run(self) -> None:  # pragma: no cover - exercised only with a running pool
-        outcome = self._call(progress=self._report) if self._with_progress else self._call()
+        self.deliver(self.outcome())
+
+    def outcome(self) -> Outcome:
+        """Call, and turn anything the call raised into a failure the page can show.
+
+        A controller call already translates the core's refusals, but a
+        screen's own wrapper around it can still raise. Letting that escape
+        the worker thread would mean no result is ever delivered, and the
+        page's busy flag -- cleared only by the result -- stays set for good.
+        """
+        try:
+            return self._call(progress=self._report) if self._with_progress else self._call()
+        except Exception as exc:  # noqa: BLE001 - reported as a bug, never swallowed
+            return Outcome(failure=Failure.UNEXPECTED, message=f"{type(exc).__name__}: {exc}")
+
+    def deliver(self, outcome: Outcome) -> None:  # pragma: no cover - worker thread
         try:
             self.signals.finished.emit((self._token, outcome))
         except RuntimeError:
@@ -167,6 +182,17 @@ class JobRunner(QObject):
 
 
 # --- text ----------------------------------------------------------------------
+
+
+def human_size(size: int) -> str:
+    """`1.3 GiB`: bytes in the largest unit that keeps the number readable."""
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return str(size)  # pragma: no cover - the loop always returns
 
 
 def label(text: str = "", name: str | None = None, *, wrap: bool = False, selectable: bool = True) -> QLabel:

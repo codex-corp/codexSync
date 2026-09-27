@@ -639,6 +639,57 @@ class ApplyTests(ProjectMoveTestCase):
         self.assertFalse((self.target / "half-copied.bin").exists())
         self.assertTrue((self.target / "README.md").is_file())
 
+    def _crash_at_the_rename(self, *, after: bool):
+        """Replace ``os.replace`` so the process "dies" at the staging rename."""
+        real_replace = os.replace
+        target = os.path.normcase(str(self.target))
+
+        def replace(src, dst, *args, **kwargs):
+            if os.path.normcase(os.fspath(dst)) != target:
+                return real_replace(src, dst, *args, **kwargs)
+            if after:
+                real_replace(src, dst, *args, **kwargs)
+            raise KeyboardInterrupt("killed at the rename")
+
+        return patch("os.replace", side_effect=replace)
+
+    def test_a_crash_right_after_the_rename_is_resumed_by_a_rescan(self) -> None:
+        """CS-325: the resume marker exists before the copy takes the target name."""
+        plan = self.plan()
+        with self._crash_at_the_rename(after=True):
+            with self.assertRaises(KeyboardInterrupt):
+                self.apply(plan)
+        self.assertTrue((self.target / "README.md").is_file())
+        self.assertEqual(self.commits, [])
+
+        resumed = self.plan()
+        self.assertEqual(resumed.codes, (), "the copy is recognised, not TARGET_EXISTS")
+        self.assertTrue(resumed.copy_complete)
+        with patch("shutil.copy2", side_effect=AssertionError("a resumed move must not copy")):
+            self.apply(resumed)
+        self.assertEqual(len(self.commits), 1)
+        self.assertFalse((self.target / STAGING_MARKER_NAME).exists(), "the carried marker is gone")
+        self.assertFalse(Path(project_move._resume_marker_path(plan.new_root)).exists())
+
+    def test_a_crash_before_the_rename_leaves_a_staging_directory_a_rerun_can_clear(self) -> None:
+        """CS-325: the staging marker stays until the rename, so ownership is provable."""
+        plan = self.plan()
+        staging = Path(project_move._staging_path(plan.new_root, plan.plan_id))
+        # A killed process runs no cleanup.
+        with self._crash_at_the_rename(after=False), \
+                patch("codexsync.project_move._remove_staging_created_here"), \
+                patch("codexsync.project_move._remove_resume_marker"):
+            with self.assertRaises(KeyboardInterrupt):
+                self.apply(plan)
+        self.assertTrue((staging / STAGING_MARKER_NAME).is_file())
+        self.assertFalse(self.target.exists())
+
+        self.apply(self.plan())
+        self.assertFalse(staging.exists())
+        self.assertTrue((self.target / "README.md").is_file())
+        self.assertFalse((self.target / STAGING_MARKER_NAME).exists())
+        self.assertEqual(len(self.commits), 1)
+
     def test_a_foreign_directory_at_the_staging_path_is_refused(self) -> None:
         plan = self.plan()
         staging = Path(project_move._staging_path(plan.new_root, plan.plan_id))

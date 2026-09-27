@@ -1,11 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import copy_metadata
 
 
 project_root = Path(SPECPATH).resolve()
+
+# The version resource (CS-273): version, product, description per language and
+# copyright, all read from package metadata and the language files -- see
+# scripts/exe_version_info.py. Nothing in it is written by hand here.
+sys.path.insert(0, str(project_root / "scripts"))
+from exe_version_info import build_version_info  # noqa: E402
+
 entrypoint = project_root / "scripts" / "pyinstaller_entrypoint.py"
 template = project_root / "src" / "codexsync" / "config.example.toml"
 
@@ -39,6 +47,7 @@ exe = EXE(
     a.datas,
     [],
     name="codexsync",
+    version=build_version_info("console"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

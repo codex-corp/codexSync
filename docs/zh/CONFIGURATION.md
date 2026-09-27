@@ -30,7 +30,9 @@ temp_dir = "${workspace_root}/.tmp"
 - **`workspace_root_dir`** 是由云客户端在机器之间同步的文件夹。其他任何路径里的
   `${workspace_root}` 都代表它。
 - **`local_state_dir`** 是 Codex 自己的状态目录。它会被读取，只有在冷操作时才被写入，
-  而且永远不会被创建。
+  而且永远不会被创建。如果它不存在，codexSync 会改用 `CODEX_HOME` 或 `~/.codex`；
+  每个命令都会先检查它自己的文件夹（下面这些，以及 Guardian、语义存储和副本的文件夹）
+  都不在实际使用的那个目录之内——否则在读写任何东西之前以退出码 4 停止。
 - **`cloud_root_dir`** 是状态在云文件夹中的镜像。
 - **`backup_dir`** 存放在替换任何东西之前所做的备份。
 - **`temp_dir`** 存放操作锁和变更日志，`restore` 也在这里解包快照。副本本身则在
@@ -38,7 +40,9 @@ temp_dir = "${workspace_root}/.tmp"
   云文件夹不在同一个磁盘上。
 
 相对路径按 `workspace_root_dir` 解析；没有工作目录时，则按 `config.toml` 所在的文件夹
-解析。
+解析。`cloud_root_dir`、`backup_dir`、`temp_dir` 和 `state.manifest_file` 不能互相
+嵌套：它们各有一个按自己的节奏从中删除文件的所有者。带 `\\?\` 前缀的路径会去掉前缀
+后再比较。
 
 ## 各节
 
@@ -54,6 +58,7 @@ temp_dir = "${workspace_root}/.tmp"
 | `[[path_mappings]]` | 一台机器上的路径如何对应到另一台 | [见下](#path_mappings) |
 | `[process_detection]` | 哪些进程意味着「Codex 在运行」 | [见下](#process_detection) |
 | `[scheduler]` | 计划执行的安全作业 | [见下](#自动化) |
+| `[state_backup]` | 登录后和/或每 N 小时制作 `.codex` 副本 | [见下](#codex-副本) |
 | `[logging]` | 级别、格式、轮转、保留 | [见下](#日志) |
 | `[safety]` | 固定不变：Codex 必须已停止，不确定就中止 | 不可编辑 |
 | `[state]` | 同步清单放在哪里 | — |
@@ -142,14 +147,14 @@ codexsync -c config.toml config upgrade --confirm-plan <id>
 
 ## 自动化
 
-计划任务是 `[scheduler]` 的生效形式。请在这里设置，或者在窗口的「设置 → 自动化」标签页
+计划任务是 `[scheduler]` 的生效形式。请在这里设置，或者在窗口的「自动化」页面
 设置，而不要直接改操作系统的计划任务。
 
 ```toml
 [scheduler]
 enabled = true
 mode = "guardian_snapshot"   # guardian_snapshot | preflight | sync_dry_run
-interval_seconds = 300       # 至少 60
+interval_seconds = 1800      # 300（5 分钟）到 2678400（31 天）；默认 1800（30 分钟）
 run_at_login = true
 startup_delay_seconds = 0
 jitter_seconds = 0
@@ -189,6 +194,55 @@ codexsync -c config.toml automation run      # 立即执行一次配置好的作
 正是这种情况 —— 会报成 `EXECUTABLE_MISSING` 或 `EXECUTABLE_MOVED`，而不是含糊的
 「与配置不符」；`automation apply` 会把它按这次安装重新注册。
 
+## `.codex` 副本
+
+Codex 状态目录中有价值部分的副本，只在 Codex 关闭时制作，并放进你选择的文件夹。在设置
+这个文件夹之前它一直是关闭的：不会自动推荐任何位置，因为由云客户端同步的文件夹会上传
+每一个副本。
+
+```toml
+[state_backup]
+root_dir = "E:/Backups/codex"   # 为空：不制作副本，任务保持关闭
+at_login = true                 # 登录后制作一个副本
+interval_hours = 24             # 和/或每 N 小时一次，最多 744；0 = 关闭
+keep = 5                        # 保留本机的副本数量
+```
+
+```powershell
+codexsync -c config.toml state-backup create          # 立即制作一个副本；Codex 打开时退出码为 3
+codexsync -c config.toml state-backup create --wait   # 先等待 Codex 关闭（最多 23 小时）
+codexsync -c config.toml state-backup list            # 文件夹中的副本
+codexsync -c config.toml automation apply             # 安装负责制作副本的任务
+```
+
+- **复制哪些内容：**会话和归档、全局状态及其 `.bak`、SQLite 目录（`state_*`、
+  `thread_history_*`、`memories_*`、`goals_*`，连同它们的 `-wal`/`-shm`）、
+  `session_index.jsonl`、`config.toml`、`AGENTS.md`、`rules`、`skills`、`memories`
+  和 `automations`。**从不复制：**`auth.json`、`cap_sid`、`.sandbox-secrets` 以及其他
+  保存令牌的内容，也不复制缓存、日志、沙盒和临时文件。在开发所用的机器上，压缩前约
+  1.2 GB。Codex 自己的 `config.toml` 会被完整复制，其中可能含有 MCP 服务器的令牌
+  （`env` 表、bearer 标头）：请把 `root_dir` 放在只有你能读取的位置，不要放在共享文件夹中。
+- **不跟随链接。** `.codex` 中的符号链接或 Windows 目录联接（`skills` 里常有指向其他
+  文件夹的联接）连同其后的一切都会被跳过；云盘占位文件是普通文件，照常复制。无法列出的
+  文件夹会使副本失败（退出码 5），而不是在副本里留下缺口。
+- **只在 Codex 关闭时。**正在写入的数据库或会话的副本不对应任何确定的时刻，因此复制与
+  写入经过同样的进程检查：在第一个文件之前 Codex 必须持续处于关闭状态，在副本计入之前
+  还会再检查一次。计划任务会等待 Codex 关闭（每 30 秒检查一次，最多 23 小时）；不带
+  `--wait` 的 `create` 和窗口里的「立即制作副本」则会拒绝（退出码 3）。读取期间发生
+  变化的文件会使副本失败。
+- **每个副本一个 zip**，`codex-<机器>-<UTC 时间>.zip`，其中包含每个文件及其 SHA-256
+  的清单。它先写成 `.partial`，读回并比对之后才会改名。之后会删除本机超出 `keep` 的
+  最旧副本；其他机器留在同一文件夹中的副本只会列出，从不删除。
+- `root_dir` 必须位于 `.codex`、`backup_dir`、`temp_dir`、云镜像、`guardian.root_dir`
+  和 `semantic.root_dir` 之外：这些目录各有自己的清理、打扫或镜像规则。
+- 这是第三个用户级任务 `CodexSync Codex backup (<用户>)`；登录后它同样会先等待
+  `startup_delay_seconds`。副本只读取 `.codex`，放回去需要手动完成：关闭 Codex，解压
+  你需要的内容。
+- 安装任务本身不会制作副本：开启 `at_login` 时，第一个副本在下次登录时制作，各平台
+  一致。该任务依赖进程检测，而它只在 Windows 上得到验证，因此在 macOS 和 Linux 上
+  `automation apply` 会拒绝安装它（以及 `sync_at_login`），而不是安装一个每次运行都以
+  退出码 5 结束的任务。
+
 ## 日志
 
 ```toml
@@ -205,3 +259,6 @@ max_file_size_mb = 10
 - 文件按天和按大小轮转；旧文件会归档成 `.zip`（`archive_mode = "zip"`）或保留为文本，
   并在 `retention_days` 之后删除。
 - 每一个危险动作都会单独记入日志：创建备份、覆盖、跳过。
+- `file` 必须位于 `.codex` 之外，`level` 必须是列出的取值之一。
+- `plan`、`sync`、`restore` 以及计划任务运行的命令（`guardian`、`preflight`、
+  `state-backup`）会写入这个文件。

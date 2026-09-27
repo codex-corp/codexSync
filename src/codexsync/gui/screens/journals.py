@@ -4,9 +4,9 @@ An unfinished mutation journal blocks every new change, and that block is the
 protection: a half-applied state is never mutated further. The screen shows the
 evidence each journal carries and offers exactly what `recover` allows for it --
 resume (close the journal so the command can be re-run; it re-plans from what
-is on disk) or roll back into an explicitly chosen target. Both start with a
-dry run, and the target is never guessed: a sync can back up both sides and the
-backup manifest records only relative paths.
+is on disk) or roll back. Both start with a dry run. A rollback puts each file
+back into the side its backup recorded (CS-293); naming a side only narrows it,
+and is needed only for an older restore whose snapshot does not record one.
 """
 from __future__ import annotations
 
@@ -115,14 +115,17 @@ class RecoveryScreen(Screen):
         journal = self._selected()
         if journal is None or model.action_busy:
             return
-        target = model.target
-        if action == "rollback" and not target:
-            return
+        # Resume takes no target; the combo belongs to rollback alone, and an
+        # empty rollback target means "the side each file came from".
+        target = model.target if action == "rollback" else ""
         if not dry_run:
             key = "recovery.confirm.resume" if action == "resume" else "recovery.confirm.rollback"
             if not self.host.confirm(
                 self.t("recovery.confirm.title"),
-                self.t(key, operation_id=journal.operation_id, target=self.t(f"backups.target.{target}") if target else ""),
+                self.t(
+                    key, operation_id=journal.operation_id,
+                    target=self.t(f"backups.target.{target}") if target else self.t("recovery.target.choose"),
+                ),
                 self.t(f"recovery.{action}.apply"),
             ):
                 return
@@ -137,17 +140,22 @@ class RecoveryScreen(Screen):
             if action == "resume":
                 done = controller.resume_journal(operation, dry_run=dry_run)
             else:
-                done = controller.rollback_journal(operation, target=target, dry_run=dry_run)
+                done = controller.rollback_journal(operation, target=target or None, dry_run=dry_run)
             if not done.ok or dry_run:
                 return Outcome(value=(done, None))
             return Outcome(value=(done, controller.journals()))
 
         def apply(model: RecoveryModel, outcome: Outcome) -> None:
             model.action_busy = False
+            if not outcome.ok:
+                # Only when the job itself broke (`_Job.outcome`); a refusal
+                # from the core arrives as ``done``.
+                model.result = outcome
+                return
             done, listing = outcome.value
             model.result = done
             if done.ok and dry_run:
-                model.checked = (operation, action, target)
+                model.checked = (operation, action, _checked_target(action, target))
             if listing is not None:
                 model.listing = listing
                 model.checked = None
@@ -215,9 +223,9 @@ class RecoveryScreen(Screen):
         journal = self._selected()
         busy = model.action_busy
         can_resume = journal is not None and journal.can_resume and not busy
-        can_rollback = journal is not None and journal.can_rollback and bool(model.target) and not busy
+        can_rollback = journal is not None and journal.can_rollback and not busy
         self.resume_dry.setEnabled(can_resume)
-        self.resume_apply.setEnabled(can_resume and model.checked == (journal.operation_id, "resume", model.target))
+        self.resume_apply.setEnabled(can_resume and model.checked == (journal.operation_id, "resume", _checked_target("resume", model.target)))
         self.target.setEnabled(journal is not None and journal.can_rollback and not busy)
         self.rollback_dry.setEnabled(can_rollback)
         self.rollback_apply.setEnabled(can_rollback and model.checked == (journal.operation_id, "rollback", model.target))
@@ -252,3 +260,12 @@ class RecoveryScreen(Screen):
         self.status.setText(text)
         set_tone(self.status, tone, palette)
         self.status.setVisible(bool(text))
+
+
+def _checked_target(action: str, target: str) -> str:
+    """The target a dry run is recorded against: rollback's only.
+
+    Resume has no target, so choosing one for rollback must not undo the dry
+    run that unlocked resume.
+    """
+    return target if action == "rollback" else ""

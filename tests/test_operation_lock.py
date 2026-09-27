@@ -81,10 +81,46 @@ class OperationLockTests(unittest.TestCase):
 
     # --- what counts as the same lock -------------------------------------
 
-    def test_different_families_do_not_block_each_other(self) -> None:
-        with self._lock(family="sync"):
-            with self._lock(family="repair"):
-                pass
+    def test_different_families_block_each_other(self) -> None:
+        """CS-304: `chats move` and `repair-projects apply` both rewrite the
+        global state, and a sync and a restore both write the same files; a
+        family in the key let each pair run together."""
+        for first, second in (("chats", "repair"), ("sync", "restore"), ("sessions", "guardian-restore")):
+            with self.subTest(first=first, second=second):
+                with self._lock(family=first):
+                    with self.assertRaises(OperationBusyError):
+                        with self._lock(family=second):
+                            self.fail("one state root is one lock for every family")
+
+    def test_a_reentrant_holder_may_enter_again_from_its_own_thread(self) -> None:
+        import threading
+
+        with OperationLock(
+            self.temp_dir, state_root=self.state_root, machine_id="machine-a",
+            family="recover", reentrant=True,
+        ):
+            with self._lock(family="restore"):
+                with self._lock(family="restore"):
+                    pass
+            # Still held after the nested exits, and never shared with another thread.
+            refused: list[BaseException] = []
+
+            def other() -> None:
+                try:
+                    with self._lock(family="sync"):
+                        pass
+                except OperationBusyError as exc:
+                    refused.append(exc)
+
+            thread = threading.Thread(target=other)
+            thread.start()
+            thread.join()
+            self.assertEqual(len(refused), 1, "another thread must not share a re-entrant lock")
+        # Fully released afterwards, and a plain holder is never re-entrant.
+        with self._lock():
+            with self.assertRaises(OperationBusyError):
+                with self._lock():
+                    pass
 
     def test_a_different_state_root_is_a_different_lock(self) -> None:
         other = self.root / "other-state"
@@ -202,7 +238,7 @@ class OperationLockTests(unittest.TestCase):
 class OperationLockNamingTests(unittest.TestCase):
     """The lock name is a contract: every command family must agree on it."""
 
-    def test_the_digest_covers_state_root_machine_and_family(self) -> None:
+    def test_the_digest_covers_state_root_and_machine_but_not_family(self) -> None:
         root = Path.cwd() / "test-sandbox" / f"operation-lock-name-{uuid.uuid4().hex}"
         state_root = root / "local-state"
         state_root.mkdir(parents=True)
@@ -211,7 +247,7 @@ class OperationLockNamingTests(unittest.TestCase):
             if os.name == "nt":
                 canonical = canonical.casefold()
             expected = hashlib.sha256(
-                "\0".join((canonical, "machine-a", "sync")).encode("utf-8")
+                "\0".join((canonical, "machine-a")).encode("utf-8")
             ).hexdigest()
             lock = OperationLock(
                 root / ".tmp", state_root=state_root, machine_id="machine-a", family="sync"

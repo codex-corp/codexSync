@@ -99,13 +99,22 @@ class JournalStore:
     def write(self, journal: MutationJournal) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / f"{journal.operation_id}.json"
-        temp = path.with_suffix(".tmp")
-        with temp.open("x", encoding="utf-8", newline="\n") as handle:
-            json.dump({**asdict(journal), "state": journal.state.value}, handle, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
+        # A fresh name per write (CS-296). A fixed `<id>.tmp` opened with "x"
+        # turned one crash between open and replace into a permanent block:
+        # every later transition of that journal -- including the ones
+        # `recover` makes to close it -- failed with FileExistsError, and the
+        # orphan sweep runs only inside a sync, which that journal blocks.
+        temp = self.root / f"{journal.operation_id}.{uuid4().hex}.tmp"
+        try:
+            with temp.open("x", encoding="utf-8", newline="\n") as handle:
+                json.dump({**asdict(journal), "state": journal.state.value}, handle, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
 
     def transition(
         self,

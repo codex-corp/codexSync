@@ -29,6 +29,7 @@ from enum import Enum
 import hashlib
 from pathlib import Path
 import sqlite3
+from urllib.parse import quote
 
 
 class SQLiteRole(str, Enum):
@@ -129,10 +130,16 @@ def read_thread_placements(
         return ThreadPlacements(
             PlacementStatus.INDETERMINATE, {}, codes=(WAL_WITHOUT_SHARED_INDEX,)
         )
-    catalogues = [
-        item for item in discovered
-        if _looks_like_thread_catalogue(root, item, timeout_seconds)
-    ]
+    shapes = [(item, _looks_like_thread_catalogue(root, item, timeout_seconds)) for item in discovered]
+    if any(shape is None for _, shape in shapes):
+        # A database whose tables could not be listed may be the catalogue.
+        # Reading that as "no catalogue" would be `ABSENT`, which constrains
+        # nothing; what is actually known is that the runtime's answer could
+        # not be seen.
+        return ThreadPlacements(
+            PlacementStatus.INDETERMINATE, {}, codes=("CATALOG_UNAVAILABLE",)
+        )
+    catalogues = [item for item, shape in shapes if shape]
     if not catalogues:
         return ThreadPlacements(PlacementStatus.ABSENT, {})
 
@@ -221,7 +228,10 @@ def _read_only_connect(database: Path, timeout_seconds: float) -> sqlite3.Connec
     """
     if _would_create_a_sidecar(database):
         return None
-    uri = f"file:{database.as_posix()}?mode=ro"
+    # The path is percent-encoded: in a URI `?` and `#` start the query and
+    # the fragment and `%` starts an escape, so a folder named with one of them
+    # would otherwise open some other file, or none.
+    uri = f"file:{quote(database.as_posix(), safe='/:')}?mode=ro"
     if not _has_pending_frames(database):
         # No pending frames, so the main file is the whole database and the WAL
         # machinery -- the part that creates and rewrites files -- is not needed
@@ -248,19 +258,24 @@ def _wal_appeared(database: Path, opened_immutable: bool) -> bool:
     return _has_pending_frames(database)
 
 
-def _looks_like_thread_catalogue(root: Path, item: SQLiteSet, timeout_seconds: float) -> bool:
-    """Whether this database has the exact table and columns to read."""
+def _looks_like_thread_catalogue(root: Path, item: SQLiteSet, timeout_seconds: float) -> bool | None:
+    """Whether this database has the exact table and columns to read.
+
+    ``None`` when that could not be found out -- busy, locked, damaged, or
+    impossible to open without writing beside it. That is not "no", and the
+    caller must not treat it as one.
+    """
     database = root / Path(item.database.relative_path)
     try:
         connection = _read_only_connect(database, timeout_seconds)
     except sqlite3.Error:
-        return False
+        return None
     if connection is None:
-        return False
+        return None
     try:
         columns = {str(row[1]) for row in connection.execute('PRAGMA table_info("threads")')}
     except sqlite3.Error:
-        return False
+        return None
     finally:
         connection.close()
     return {"id", "rollout_path", "archived"}.issubset(columns)

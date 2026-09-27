@@ -8,7 +8,9 @@ line exactly as the user wrote it. Before anything is written the edited text
 goes through the same loader the command line uses, the difference is shown,
 and the save refuses if the file changed on disk since it was opened. The
 replaced version goes into the config history first, and every open plan in
-the window is discarded afterwards.
+the window is discarded afterwards. That behaviour is `ConfigFormScreen`'s,
+shared with the Automation page, which edits `[scheduler]` and
+`[state_backup]` the same way (CS-276).
 
 Two settings are displayed and deliberately not editable: requiring Codex to be
 stopped and failing on uncertainty. A window whose checkbox could switch off the
@@ -24,7 +26,6 @@ Which config file is open is also decided here. The window remembers the path
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,32 +34,20 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
-    QDoubleSpinBox,
     QFormLayout,
-    QFrame,
-    QHeaderView,
     QLineEdit,
     QPlainTextEdit,
     QScrollArea,
-    QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
+    QFrame,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from ..controller import (
-    BROKEN_TASK_CODES,
-    FOREIGN_TASK,
-    LEGACY_TASK,
-    PATH_SUBSTITUTIONS,
-    REMOVE,
-    ConfigEdits,
     Outcome,
     default_background_process_names,
     default_process_names,
-    resolve_path_preview,
 )
 from ..i18n import available_languages, load
 from ..widgets import (
@@ -76,29 +65,9 @@ from ..widgets import (
     set_tone,
     table,
 )
-from .base import Model, Screen
+from .config_form import ConfigFormModel, ConfigFormScreen, Field, raw_value
 
-
-@dataclass(frozen=True)
-class Field:
-    section: str
-    key: str
-    kind: str  # text | path | int | float | bool | choice | lines
-    default: Any = None
-    choices: tuple[str, ...] = ()
-    minimum: float = 0
-    maximum: float = 10**9
-    locked: bool = False
-    step: float = 1
-    #: Values shown in the list but not selectable, each for a stated reason.
-    #: A rule the user cannot change is still a rule they should be able to
-    #: see; leaving the value out would make the screen look like the option
-    #: does not exist, and they would go looking for it in the file.
-    blocked: tuple[str, ...] = ()
-
-    @property
-    def id(self) -> tuple[str, str]:
-        return (self.section, self.key)
+__all__ = ["Field", "SettingsModel", "SettingsScreen", "TABS", "raw_value"]
 
 
 TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
@@ -161,15 +130,6 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         Field("guardian", "fallback_scan_seconds", "float", 60.0, minimum=1, maximum=86400, step=10),
         Field("guardian", "once_timeout_seconds", "float", 120.0, minimum=1, maximum=86400, step=10),
     )),
-    ("automation", (
-        Field("scheduler", "enabled", "bool", False),
-        Field("scheduler", "mode", "choice", "guardian_snapshot", ("guardian_snapshot", "preflight", "sync_dry_run")),
-        Field("scheduler", "interval_seconds", "int", 60, minimum=60, maximum=7 * 24 * 3600, step=60),
-        Field("scheduler", "run_at_login", "bool", True),
-        Field("scheduler", "startup_delay_seconds", "int", 0, maximum=24 * 3600),
-        Field("scheduler", "jitter_seconds", "int", 0, maximum=24 * 3600),
-        Field("scheduler", "sync_at_login", "bool", False),
-    )),
     ("mappings", ()),
     ("service", (
         Field("backup", "retention_days", "int", 30, maximum=36500),
@@ -189,10 +149,6 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
     )),
 )
 
-#: Keys an older `[scheduler]` section carries that the current contract
-#: replaced. Dropped when the automation settings are saved, so the file does
-#: not keep saying something nothing reads.
-LEGACY_SCHEDULER_KEYS = ("kind", "interval_minutes")
 #: The tab area never gets less than this, whatever the cards above it hold.
 TABS_MIN_HEIGHT = 380
 #: An unfolded migration card scrolls inside this height instead of growing.
@@ -209,34 +165,14 @@ def _mapping_cell(entry: dict[str, Any], column: str) -> str:
     return "" if value is None else str(value)
 
 
-def raw_value(raw: dict[str, Any], section: str, key: str) -> Any:
-    node: Any = raw
-    for part in section.split("."):
-        if not isinstance(node, dict):
-            return None
-        node = node.get(part)
-    return node.get(key) if isinstance(node, dict) else None
-
-
-class SettingsModel(Model):
+class SettingsModel(ConfigFormModel):
     def __init__(self) -> None:
-        self.opened: Outcome | None = None
-        self.busy = False
+        super().__init__()
         self.tab = "general"
-        #: Field id -> value typed on screen, kept across language changes.
-        self.draft: dict[tuple[str, str], Any] = {}
-        self.mappings: list[dict[str, Any]] | None = None
         #: Folders and machine names the rule form offers; read in the background.
         self.hints: Outcome | None = None
         self.hints_busy = False
-        self.action_busy = False
-        self.action_kind = ""
-        self.result: Outcome | None = None
         self.history: Outcome | None = None
-        self.automation: Outcome | None = None
-        self.task_busy = False
-        self.task_kind = ""
-        self.task_result: Outcome | None = None
         #: What this version would change in the config file itself, the diff
         #: it would produce, and which optional findings the user unticked.
         self.migration: Outcome | None = None
@@ -249,11 +185,8 @@ class SettingsModel(Model):
         self.migration_result: Outcome | None = None
 
     def reset_plans(self) -> None:
-        self.opened = None
-        self.draft = {}
-        self.mappings = None
+        super().reset_plans()
         self.history = None
-        self.automation = None
         self.hints = None
         self.migration = None
         self.migration_skip = set()
@@ -262,7 +195,7 @@ class SettingsModel(Model):
         self.migration_result = None
 
 
-class SettingsScreen(Screen):
+class SettingsScreen(ConfigFormScreen):
     page = "settings"
     #: The page scrolls as a whole so that nothing above the tabs -- the
     #: migration card above all -- can squeeze them to nothing: on a small
@@ -270,7 +203,12 @@ class SettingsScreen(Screen):
     scrollable = True
     scroll_tail_stretch = False
 
+    def form_fields(self):
+        for _tab_id, fields in TABS:
+            yield from fields
+
     def build(self) -> None:
+        self.init_form()
         self.banner = Banner(actions_below=True)
         self.reload_button = button(self.t("settings.reload"))
         self.reload_button.clicked.connect(self.reload)
@@ -283,11 +221,6 @@ class SettingsScreen(Screen):
         self.migration_card = self._build_migration()
         self.body.addWidget(self.migration_card)
 
-        self._widgets: dict[tuple[str, str], QWidget] = {}
-        #: Field id -> the line under a path box showing what it resolves to.
-        self._computed: dict[tuple[str, str], QWidget] = {}
-        #: Field id -> the substitution help, hidden until "?" is pressed.
-        self._help: dict[tuple[str, str], QWidget] = {}
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self._tab_ids: list[str] = []
@@ -304,20 +237,7 @@ class SettingsScreen(Screen):
         # Enough for a few fields whatever sits above; the page scrolls past it.
         self.tabs.setMinimumHeight(TABS_MIN_HEIGHT)
         self.body.addWidget(self.tabs, stretch=1)
-
-        self.check_button = button(self.t("settings.check"))
-        self.check_button.clicked.connect(lambda: self.check(save=False))
-        self.revert_button = button(self.t("settings.revert"))
-        self.revert_button.clicked.connect(self.revert)
-        self.save_button = button(self.t("settings.save"), primary=True)
-        self.save_button.clicked.connect(lambda: self.check(save=True))
-        self.changes = label("", "muted")
-        actions = row(self.changes, stretch_last=True)
-        for widget in (self.check_button, self.revert_button, self.save_button):
-            actions.addWidget(widget)
-        self.body.addLayout(actions)
-        self.status = label("", wrap=True)
-        self.body.addWidget(self.status)
+        self.build_form_actions()
 
     # --- building forms --------------------------------------------------------------
 
@@ -336,73 +256,19 @@ class SettingsScreen(Screen):
         column.setContentsMargins(4, 14, 12, 14)
         column.setSpacing(12)
         column.addWidget(label(self.t(f"settings.tab.{tab_id}.caption"), "muted", wrap=True))
-        frame, card_layout = card()
-        form = QFormLayout()
-        form.setHorizontalSpacing(20)
-        form.setVerticalSpacing(8)
-        for spec in fields:
-            widget = self._field_widget(spec)
-            self._widgets[spec.id] = widget
-            name = f"settings.field.{spec.section}.{spec.key}"
-            title = label(self.t(name))
-            title.setToolTip(f"[{spec.section}] {spec.key}")
-            hint = f"settings.hint.{spec.section}.{spec.key}"
-            cell = field(widget, self.t(hint) if self.host.catalog.has(hint) else None)
-            reason = f"settings.reason.{spec.section}.{spec.key}"
-            if (spec.locked or spec.blocked) and self.host.catalog.has(reason):
-                cell = self._with_reason(cell, self.t(reason))
-            if spec.kind == "path":
-                cell = self._with_path_help(spec, cell)
-            elif spec.id == ("targets", "include_roots"):
-                cell = self._with_tree_picker(cell)
-            form.addRow(title, cell)
-        card_layout.addLayout(form)
-        if tab_id == "general":
-            column.addWidget(frame)
-            column.addWidget(self._build_substitutions())
-            frame = QWidget()
+        frame, _card_layout = self.form_card(fields)
         column.addWidget(frame)
-        if tab_id == "automation":
-            column.addWidget(self._build_automation_status())
+        if tab_id == "general":
+            column.addWidget(self._build_substitutions())
         if tab_id == "service":
             column.addWidget(self._build_history())
         column.addStretch(1)
         return self._scroll(inner)
 
-    def _with_path_help(self, spec: Field, cell: QWidget) -> QWidget:
-        """A path box, what it resolves to, and a "?" that explains the rules."""
-        holder = QWidget()
-        column = QVBoxLayout(holder)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(2)
-        ask = button("?")
-        # The ordinary 20px side padding leaves a 28px button no room for its
-        # own label, which is how this rendered as an empty box.
-        ask.setObjectName("compact")
-        ask.setFixedWidth(36)
-        ask.setToolTip(self._substitution_help())
-        line = row(cell, ask, stretch_last=False)
-        line.setStretch(0, 1)
-        column.addLayout(line)
-        computed = label("", "muted", wrap=True)
-        self._computed[spec.id] = computed
-        column.addWidget(computed)
-        explanation = label(self._substitution_help(), "muted", wrap=True)
-        explanation.setVisible(False)
-        self._help[spec.id] = explanation
-        ask.clicked.connect(lambda _checked=False, w=explanation: w.setVisible(not w.isVisible()))
-        column.addWidget(explanation)
-        return holder
-
-    def _with_reason(self, cell: QWidget, text: str) -> QWidget:
-        """A field, and one visible line saying why it is the way it is."""
-        holder = QWidget()
-        column = QVBoxLayout(holder)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(2)
-        column.addWidget(cell)
-        column.addWidget(label(text, "muted", wrap=True))
-        return holder
+    def decorate_cell(self, spec: Field, cell: QWidget) -> QWidget:
+        if spec.id == ("targets", "include_roots"):
+            return self._with_tree_picker(cell)
+        return super().decorate_cell(spec, cell)
 
     def _with_tree_picker(self, cell: QWidget) -> QWidget:
         """The roots box, plus a button that opens the two state directories."""
@@ -456,88 +322,6 @@ class SettingsScreen(Screen):
         self.substitutions = label(self._substitution_help(), wrap=True)
         layout.addWidget(self.substitutions)
         return frame
-
-    def _workspace_text(self) -> str:
-        widget = self._widgets.get(("paths", "workspace_root_dir"))
-        return widget.text() if widget is not None else ""
-
-    def _substitution_help(self) -> str:
-        root = self._workspace_text()
-        listed = self.join([
-            self.t("settings.paths.substitution", token=token,
-                   value=root or self.t("settings.paths.unset"))
-            for token in PATH_SUBSTITUTIONS
-        ])
-        anchor = root or str(self.host.controller.config_path.resolve().parent)
-        return self.t("settings.paths.help", substitutions=listed, anchor=anchor)
-
-    def _render_paths(self) -> None:
-        """Recompute every path line from what is typed now."""
-        base = self.host.controller.config_path.resolve().parent
-        workspace = self._workspace_text()
-        for spec_id, widget in self._computed.items():
-            box = self._widgets.get(spec_id)
-            value = box.text() if box is not None else ""
-            if not value:
-                widget.setText("")
-                widget.setVisible(False)
-                continue
-            outcome = resolve_path_preview(value, base_dir=base, workspace_root=workspace or None)
-            if outcome.ok:
-                widget.setText(self.t("settings.paths.computed", path=outcome.value))
-                set_tone(widget, None, self.palette_)
-            else:
-                widget.setText(self.failure_text(outcome))
-                set_tone(widget, "danger", self.palette_)
-            widget.setVisible(True)
-        if hasattr(self, "substitutions"):
-            self.substitutions.setText(self._substitution_help())
-        for widget in self._help.values():
-            widget.setText(self._substitution_help())
-
-    def _field_widget(self, field: Field) -> QWidget:
-        kind = field.kind
-        if kind == "bool":
-            widget = QCheckBox()
-            widget.toggled.connect(lambda _v, f=field: self._changed(f))
-        elif kind == "choice":
-            widget = QComboBox()
-            for choice in field.choices:
-                key = f"settings.choice.{field.section}.{field.key}.{choice}"
-                widget.addItem(self.t(key) if self.host.catalog.has(key) else choice, choice)
-                if choice in field.blocked:
-                    # Visible, and not selectable. The reason is written out
-                    # under the field, not hidden in a tooltip.
-                    item = widget.model().item(widget.count() - 1)
-                    if item is not None:
-                        item.setEnabled(False)
-            widget.currentIndexChanged.connect(lambda _v, f=field: self._changed(f))
-        elif kind == "int":
-            widget = QSpinBox()
-            widget.setButtonSymbols(QSpinBox.NoButtons)
-            widget.setRange(int(field.minimum), int(field.maximum))
-            widget.setSingleStep(int(field.step))
-            widget.valueChanged.connect(lambda _v, f=field: self._changed(f))
-        elif kind == "float":
-            widget = QDoubleSpinBox()
-            widget.setButtonSymbols(QDoubleSpinBox.NoButtons)
-            widget.setRange(field.minimum, field.maximum)
-            widget.setSingleStep(field.step)
-            widget.setDecimals(2)
-            widget.valueChanged.connect(lambda _v, f=field: self._changed(f))
-        elif kind == "lines":
-            widget = QPlainTextEdit()
-            widget.setFixedHeight(96)
-            widget.textChanged.connect(lambda f=field: self._changed(f))
-        elif kind == "path":
-            widget = PathField(self.t("common.browse"))
-            widget.edit.textChanged.connect(lambda _v, f=field: self._changed(f))
-        else:
-            widget = QLineEdit()
-            widget.textChanged.connect(lambda _v, f=field: self._changed(f))
-        if field.locked:
-            widget.setEnabled(False)
-        return widget
 
     def _build_mappings(self) -> QWidget:
         """The rules, and one form to write them with.
@@ -750,117 +534,6 @@ class SettingsScreen(Screen):
             path = Path(chosen)
         self.host.open_config(Path(path))
 
-    def _build_automation_status(self) -> QWidget:
-        frame, layout = card(self.t("automation.task.title"))
-        self.task_state = label("", wrap=True)
-        layout.addWidget(self.task_state)
-        self.task_banner = Banner()
-        layout.addWidget(self.task_banner)
-        self.task_details = label("", "muted", wrap=True)
-        layout.addWidget(self.task_details)
-        #: The sign-in sync is its own task (CS-267); its state is its own line.
-        self.login_task = label("", wrap=True)
-        layout.addWidget(self.login_task)
-        self.task_command = label("", "command", wrap=True)
-        layout.addWidget(self.task_command)
-        self.task_run = button(self.t("automation.run_now"))
-        self.task_run.clicked.connect(self.run_task_now)
-        self.task_apply = button(self.t("automation.apply"), primary=True)
-        self.task_apply.clicked.connect(self.apply_task)
-        self.task_remove = button(self.t("automation.remove"))
-        self.task_remove.clicked.connect(self.remove_task)
-        self.task_refresh = button(self.t("action.refresh"))
-        self.task_refresh.clicked.connect(self.refresh_task)
-        layout.addLayout(row(self.task_run, self.task_apply, self.task_remove, self.task_refresh))
-        self.task_status = label("", wrap=True)
-        layout.addWidget(self.task_status)
-        layout.addWidget(label(self.t("automation.task.caption"), "muted", wrap=True))
-        return frame
-
-    # --- automation ------------------------------------------------------------------
-
-    def refresh_task(self) -> None:
-        if self.model.task_busy or not self.host.controller.config_exists():
-            return
-        self.model.task_busy = True
-        self.model.task_kind = "status"
-        self.render()
-
-        def apply(model: SettingsModel, outcome: Outcome) -> None:
-            model.task_busy = False
-            model.automation = outcome
-
-        self.read(self.host.controller.automation, apply)
-
-    def _task_codes(self) -> tuple[str, ...]:
-        outcome = self.model.automation
-        if outcome is None or not outcome.ok or outcome.value is None:
-            return ()
-        status = outcome.value.status
-        return status.codes if status is not None else ()
-
-    def apply_task(self) -> None:
-        """Save pending edits first (with the usual review), then update the OS task."""
-        if self.model.task_busy:
-            return
-        codes = self._task_codes()
-        if FOREIGN_TASK in codes:
-            return
-        broken = [code for code in codes if code in BROKEN_TASK_CODES]
-        if (broken or LEGACY_TASK in codes) and not self.host.confirm(
-            self.t("automation.repair.confirm.title"),
-            self.t(
-                "automation.repair.confirm.body",
-                codes=", ".join(broken or [LEGACY_TASK]),
-            ),
-            self.t("automation.apply"),
-        ):
-            return
-        if self.model.draft or self.model.mappings is not None:
-            self.check(save=True, then_apply=True)
-            return
-        self._start_task("apply")
-
-    def remove_task(self) -> None:
-        if self.model.task_busy:
-            return
-        if not self.host.confirm(
-            self.t("automation.remove.confirm.title"),
-            self.t("automation.remove.confirm.body"),
-            self.t("automation.remove"),
-        ):
-            return
-        self._start_task("remove")
-
-    def run_task_now(self) -> None:
-        if self.model.task_busy:
-            return
-        self._start_task("run")
-
-    def _start_task(self, kind: str) -> None:
-        model = self.model
-        model.task_busy = True
-        model.task_kind = kind
-        model.task_result = None
-        self.render()
-        controller = self.host.controller
-        calls = {
-            "apply": controller.apply_automation,
-            "remove": controller.remove_automation,
-            "run": controller.run_automation_now,
-        }
-        call = calls[kind]
-
-        def go() -> Outcome:
-            done = call()
-            return Outcome(value=(done, controller.automation()))
-
-        def apply(model: SettingsModel, outcome: Outcome) -> None:
-            model.task_busy = False
-            model.task_result, model.automation = outcome.value
-
-        self.run(go, apply)
-
     def _build_migration(self) -> QWidget:
         """The card that appears when the config was written by an older version.
 
@@ -963,14 +636,20 @@ class SettingsScreen(Screen):
         model.migration_result = None
         self._render_migration()
         controller = self.host.controller
+        host = self.host
         plan_id = plan.plan_id
         skip = tuple(sorted(model.migration_skip))
 
         def apply(model: SettingsModel, outcome: Outcome) -> None:
             model.migration_busy = False
-            model.migration_result = outcome
             model.migration = None
             model.migration_skip = set()
+            if outcome.ok:
+                # The file changed under every page, exactly as after a save:
+                # without this the form keeps the old values and the next
+                # save is refused as "changed on disk" (CS-307).
+                host.config_changed()
+            model.migration_result = outcome
 
         def go() -> Outcome:
             return controller.apply_config_migration(confirm_plan=plan_id, skip=skip)
@@ -1077,14 +756,17 @@ class SettingsScreen(Screen):
         layout.addWidget(self.history)
         return frame
 
+    def _render_paths(self) -> None:
+        super()._render_paths()
+        if hasattr(self, "substitutions"):
+            self.substitutions.setText(self._substitution_help())
+
     # --- data flow -----------------------------------------------------------------
 
     def activated(self) -> None:
         exists = self.host.controller.config_exists()
         if self.model.opened is None and not self.model.busy and exists:
             self.reload(keep_result=True)
-        if self.model.automation is None and not self.model.task_busy and exists:
-            self.refresh_task()
         if self.model.migration is None and not self.model.migration_busy and exists:
             self.refresh_migration()
         if self.model.tab == "mappings":
@@ -1117,31 +799,11 @@ class SettingsScreen(Screen):
             apply, progress=True,
         )
 
-    def reload(self, *, keep_result: bool = False) -> None:
-        model = self.model
-        if model.busy:
-            return
-        model.busy = True
-        model.draft = {}
-        model.mappings = None
-        if not keep_result:
-            model.result = None
-        self.render()
-        controller = self.host.controller
+    def read_alongside(self, controller) -> Any:
+        return controller.config_history()
 
-        def go() -> Outcome:
-            opened = controller.open_config()
-            history = controller.config_history() if opened.ok else None
-            return Outcome(value=(opened, history))
-
-        def apply(model: SettingsModel, outcome: Outcome) -> None:
-            model.busy = False
-            if not outcome.ok:
-                model.opened = outcome
-                return
-            model.opened, model.history = outcome.value
-
-        self.read(go, apply)
+    def apply_alongside(self, model: SettingsModel, value: Any) -> None:
+        model.history = value
 
     def _tab_changed(self, index: int) -> None:
         if 0 <= index < len(self._tab_ids):
@@ -1149,160 +811,12 @@ class SettingsScreen(Screen):
         if self.model.tab == "mappings":
             self.load_mapping_hints()
 
-    def _raw(self) -> dict[str, Any] | None:
-        opened = self.model.opened
-        return opened.value.raw if opened is not None and opened.ok else None
-
-    def _file_value(self, field: Field) -> Any:
-        raw = self._raw() or {}
-        value = raw_value(raw, field.section, field.key)
-        return field.default if value is None else value
-
-    def _widget_value(self, field: Field) -> Any:
-        widget = self._widgets[field.id]
-        if field.kind == "bool":
-            return widget.isChecked()
-        if field.kind == "choice":
-            return widget.currentData()
-        if field.kind == "int":
-            return int(widget.value())
-        if field.kind == "float":
-            return float(widget.value())
-        if field.kind == "lines":
-            return [line.strip() for line in widget.toPlainText().splitlines() if line.strip()]
-        return widget.text().strip() if field.kind == "path" else widget.text()
-
-    def _set_widget(self, field: Field, value: Any) -> None:
-        widget = self._widgets[field.id]
-        widget.blockSignals(True)
-        if field.kind == "path":
-            widget.edit.blockSignals(True)
-        try:
-            if field.kind == "bool":
-                widget.setChecked(bool(value))
-            elif field.kind == "choice":
-                index = widget.findData(value)
-                if index < 0 and value is not None:
-                    widget.addItem(str(value), value)
-                    index = widget.findData(value)
-                widget.setCurrentIndex(max(0, index))
-            elif field.kind == "int":
-                widget.setValue(int(value or 0))
-            elif field.kind == "float":
-                widget.setValue(float(value or 0))
-            elif field.kind == "lines":
-                widget.setPlainText("\n".join(str(item) for item in (value or [])))
-            elif field.kind == "path":
-                widget.setText("" if value is None else str(value))
-            else:
-                widget.setText("" if value is None else str(value))
-        finally:
-            widget.blockSignals(False)
-            if field.kind == "path":
-                widget.edit.blockSignals(False)
-
-    def _changed(self, field: Field) -> None:
-        if self._raw() is None:
-            return
-        value = self._widget_value(field)
-        if _same(value, self._file_value(field)):
-            self.model.draft.pop(field.id, None)
-        else:
-            self.model.draft[field.id] = value
-        self.model.result = None
-        self._render_changes()
-        # A path, or the workspace root every other path may be written
-        # against, just changed: the computed lines have to follow the text.
-        if field.kind == "path" or field.id == ("paths", "workspace_root_dir"):
-            self._render_paths()
-        # The automation card describes the draft, including the sign-in sync.
-        if field.id[0] == "scheduler":
-            self._render_task()
-
     def _file_mappings(self) -> list[dict[str, Any]]:
-        raw = self._raw() or {}
-        value = raw.get("path_mappings", [])
-        return [dict(item) for item in value] if isinstance(value, list) else []
+        return _mappings_in(self._raw() or {})
 
-    def edits(self) -> ConfigEdits:
-        values: dict[tuple[str, str], Any] = dict(self.model.draft)
-        raw = self._raw() or {}
-        if any(section == "scheduler" for section, _ in values):
-            scheduler = raw.get("scheduler", {}) if isinstance(raw.get("scheduler"), dict) else {}
-            for key in LEGACY_SCHEDULER_KEYS:
-                if key in scheduler:
-                    values[("scheduler", key)] = REMOVE
-        return ConfigEdits(values=values, mappings=self.model.mappings)
-
-    def revert(self) -> None:
-        self.model.draft = {}
-        self.model.mappings = None
-        self.model.result = None
-        self.render()
-
-    def check(self, *, save: bool, then_apply: bool = False) -> None:
-        model = self.model
-        opened = model.opened.value if model.opened is not None and model.opened.ok else None
-        if opened is None or model.action_busy:
-            return
-        edits = self.edits()
-        if not edits.values and edits.mappings is None:
-            return
-        model.action_busy = True
-        model.action_kind = "check"
-        model.result = None
-        self.render()
-        controller = self.host.controller
-        base = opened.document
-
-        def go() -> Outcome:
-            rendered = controller.render_config(base.text, edits)
-            if not rendered.ok:
-                return rendered
-            validated = controller.validate_config(rendered.value)
-            if not validated.ok:
-                return validated
-            return Outcome(value=rendered.value)
-
-        host = self.host
-        page = self
-
-        def apply(model: SettingsModel, outcome: Outcome) -> None:
-            model.action_busy = False
-            model.result = outcome
-            if outcome.ok and save:
-                # Confirmation happens on the UI thread, after the text is proven valid.
-                QTimer.singleShot(0, lambda: page._confirm_save(host, base, outcome.value, then_apply))
-
-        self.read(go, apply)
-
-    def _confirm_save(self, host, base, text: str, then_apply: bool = False) -> None:
-        diff = host.controller.config_diff(base.text, text)
-        if not host.confirm(
-            self.t("settings.confirm.title"),
-            self.t("settings.confirm.body", path=host.controller.config_path),
-            self.t("settings.save"),
-            details=diff,
-        ):
-            return
-        model = self.model
-        model.action_busy = True
-        model.action_kind = "save"
-        self.render()
-        controller = host.controller
-
-        def apply(model: SettingsModel, outcome: Outcome) -> None:
-            model.action_busy = False
-            model.result = outcome
-            if outcome.ok:
-                model.action_kind = "saved"
-                saved = outcome
-                host.config_changed()
-                model.result = saved
-                if then_apply:
-                    host.screen("settings")._start_task("apply")
-
-        self.run(lambda: controller.save_config(text, expected_sha256=base.sha256), apply)
+    def file_mappings_of(self, model) -> list[dict[str, Any]] | None:
+        opened = model.opened
+        return _mappings_in(opened.value.raw) if opened is not None and opened.ok else None
 
     # --- drawing ---------------------------------------------------------------------
 
@@ -1328,12 +842,7 @@ class SettingsScreen(Screen):
             )
 
         raw = self._raw()
-        for tab_id, fields in TABS:
-            for field in fields:
-                value = model.draft.get(field.id, self._file_value(field) if raw is not None else field.default)
-                self._set_widget(field, value)
-                if not field.locked:
-                    self._widgets[field.id].setEnabled(raw is not None)
+        self.render_fields()
         fill_table(
             self.mapping_table,
             [
@@ -1347,7 +856,6 @@ class SettingsScreen(Screen):
         self._mapping_form_changed()
         self._render_mapping_buttons()
         self._render_history()
-        self._render_task()
         self._render_changes()
 
     def _render_history(self) -> None:
@@ -1363,201 +871,7 @@ class SettingsScreen(Screen):
         fill_table(self.history, rows, self.palette_)
         self.history_summary.setText(self.p("settings.history.count", len(outcome.value)))
 
-    def _render_task(self) -> None:
-        model = self.model
-        palette = self.palette_
-        values = {field.key: model.draft.get(field.id, self._file_value(field)) for field in TABS[3][1]}
-        mode = values.get("mode")
-        mode_key = f"settings.choice.scheduler.mode.{mode}"
-        if not values.get("enabled"):
-            self.task_state.setText(self.t("automation.summary.disabled"))
-        else:
-            login_key = "automation.summary.login" if values.get("run_at_login") else "automation.summary.no_login"
-            self.task_state.setText(self.t(
-                "automation.summary.enabled",
-                mode=self.t(mode_key) if self.host.catalog.has(mode_key) else mode,
-                every=self._interval(int(values.get("interval_seconds") or 60)),
-                login=self.t(login_key),
-            ))
 
-        outcome = model.automation
-        view = outcome.value if outcome is not None and outcome.ok else None
-        exists = self.host.controller.config_exists()
-        busy = model.task_busy
-        self.task_refresh.setEnabled(exists and not busy)
-        self.task_run.setEnabled(exists and not busy)
-        self.task_apply.setEnabled(exists and not busy)
-        installed = view is not None and view.status is not None and view.status.installed
-        self.task_remove.setEnabled(exists and not busy and installed)
-
-        if outcome is not None and not outcome.ok:
-            self.task_banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
-            self.task_details.setText("")
-            self.task_command.setVisible(False)
-        elif view is None:
-            self.task_banner.show_message("neutral", self.t("automation.loading") if busy else "", "", palette)
-            self.task_details.setText("")
-            self.task_command.setVisible(False)
-        else:
-            status = view.status
-            if view.status_error:
-                tone, title = "danger", self.t("automation.os.error")
-            elif status is None or not status.installed:
-                tone = "attention" if view.enabled else "neutral"
-                title = self.t("automation.os.not_installed")
-            elif FOREIGN_TASK in status.codes:
-                # Another account's task: shown, never touched.
-                tone, title = "attention", self.t("automation.os.foreign")
-            elif any(code in BROKEN_TASK_CODES for code in status.codes):
-                tone, title = "danger", self.t("automation.os.broken")
-            elif LEGACY_TASK in status.codes:
-                tone, title = "attention", self.t("automation.os.legacy")
-            elif not view.enabled:
-                tone, title = "attention", self.t("automation.os.installed_but_disabled")
-            elif status.definition_matches is False:
-                tone, title = "attention", self.t("automation.os.outdated")
-            elif status.enabled is False:
-                tone, title = "attention", self.t("automation.os.disabled_in_os")
-            else:
-                tone, title = "ok", self.t("automation.os.active")
-            self.task_banner.show_message(tone, title, view.status_error or "", palette)
-            lines = []
-            if status is not None and status.installed:
-                lines.append(self.t("automation.last_run", when=_when_or_never(status.last_run_utc, self.t("automation.never"))))
-                lines.append(self.t("automation.next_run", when=_when_or_never(status.next_run_utc, self.t("automation.unknown"))))
-                if status.last_result is not None:
-                    result_key = f"automation.exit.{status.last_result}"
-                    meaning = self.t(result_key) if self.host.catalog.has(result_key) else self.t("automation.exit.other")
-                    lines.append(self.t("automation.last_result", code=status.last_result, meaning=meaning))
-                if not view.reports_run_times:
-                    lines.append(self.t("automation.no_run_times"))
-            if status is not None and status.owner and status.owned_by_me is False:
-                lines.append(self.t("automation.task.owner", owner=status.owner))
-            if status is not None and any(code in BROKEN_TASK_CODES for code in status.codes):
-                lines.append(self.t(
-                    "automation.task.runs",
-                    command=" ".join(_quote(part) for part in (status.installed_command or ())),
-                ))
-            if view.ignored:
-                names = ", ".join(self.t(f"settings.field.scheduler.{name}") for name in view.ignored)
-                lines.append(self.t("automation.ignored", settings=names))
-            self.task_details.setText("\n".join(lines))
-            self.task_command.setText(" ".join(_quote(part) for part in view.argv))
-            self.task_command.setVisible(True)
-
-        text, tone = "", None
-        if busy and model.task_kind != "status":
-            text = self.t(f"automation.working.{model.task_kind}")
-        elif model.task_result is not None:
-            result = model.task_result
-            if not result.ok:
-                text, tone = self.failure_text(result), "danger"
-            elif model.task_kind == "run":
-                ran = result.value
-                ran_key = f"automation.ran.{ran.status}"
-                text = self.t(ran_key) if self.host.catalog.has(ran_key) else ran.status
-                if ran.actions is not None:
-                    text += " " + self.p("sync.count.files", ran.actions)
-                if ran.detail:
-                    text += " " + ran.detail
-                good = {"COMMITTED", "UNCHANGED", "PASSED", "DRY_RUN_FINISHED"}
-                tone = "ok" if ran.status in good else "attention"
-            elif model.task_kind == "remove":
-                text = self.t("automation.removed" if result.value else "automation.nothing_to_remove")
-                tone = "ok"
-            else:
-                text, tone = self.t("automation.applied"), "ok"
-        self.task_status.setText(text)
-        set_tone(self.task_status, tone, palette)
-        self.task_status.setVisible(bool(text))
-        self._render_login_task(view, bool(values.get("sync_at_login")))
-
-    def _render_login_task(self, view, wanted: bool) -> None:
-        """One line on the sign-in sync task: off, waiting to be applied, or its last result."""
-        palette = self.palette_
-        text, tone = "", None
-        if view is not None:
-            status = view.login_status
-            installed = status is not None and status.installed
-            if view.login_status_error:
-                text, tone = self.t("automation.login.error", error=view.login_status_error), "danger"
-            elif not wanted and not installed:
-                text = self.t("automation.login.off")
-            elif not wanted:
-                text, tone = self.t("automation.login.installed_but_off"), "attention"
-            elif not installed:
-                text, tone = self.t("automation.login.not_installed"), "attention"
-            else:
-                if status.last_result is None:
-                    result = self.t("automation.never")
-                else:
-                    key = f"automation.exit.{status.last_result}"
-                    result = self.t(key) if self.host.catalog.has(key) else self.t("automation.exit.other")
-                text = self.t(
-                    "automation.login.active",
-                    when=_when_or_never(status.last_run_utc, self.t("automation.never")),
-                    result=result,
-                )
-                tone = "ok"
-        elif wanted:
-            text = self.t("automation.login.pending")
-        self.login_task.setText(text)
-        set_tone(self.login_task, tone, palette)
-        self.login_task.setVisible(bool(text))
-
-    def _interval(self, seconds: int) -> str:
-        if seconds % 3600 == 0:
-            return self.p("common.hours", seconds // 3600)
-        if seconds % 60 == 0:
-            return self.p("common.minutes", seconds // 60)
-        return self.p("common.seconds", seconds)
-
-    def _render_changes(self) -> None:
-        model = self.model
-        palette = self.palette_
-        count = len(model.draft) + (1 if model.mappings is not None else 0)
-        opened = model.opened is not None and model.opened.ok
-        busy = model.busy or model.action_busy
-        self.changes.setText(self.p("settings.changes", count) if opened else "")
-        self.check_button.setEnabled(opened and count > 0 and not busy)
-        self.revert_button.setEnabled(opened and count > 0 and not busy)
-        self.save_button.setEnabled(opened and count > 0 and not busy)
-
-        text, tone = "", None
-        if model.action_busy:
-            text = self.t("settings.saving" if model.action_kind == "save" else "settings.checking")
-        elif model.result is not None:
-            if not model.result.ok:
-                text, tone = self.failure_text(model.result), "danger"
-            elif model.action_kind == "saved":
-                saved = model.result.value
-                text = self.t("settings.saved", path=saved.path)
-                if saved.history_entry is not None:
-                    text += " " + self.t("settings.saved.history", path=saved.history_entry)
-                tone = "ok"
-            else:
-                text, tone = self.t("settings.valid"), "ok"
-        self.status.setText(text)
-        set_tone(self.status, tone, palette)
-        self.status.setVisible(bool(text))
-
-
-def _same(first: Any, second: Any) -> bool:
-    if isinstance(first, float) or isinstance(second, float):
-        try:
-            return abs(float(first) - float(second)) < 1e-9
-        except (TypeError, ValueError):
-            return False
-    if isinstance(first, list) or isinstance(second, list):
-        return list(first or []) == list(second or [])
-    return first == second
-
-
-def _when_or_never(iso: str | None, fallback: str) -> str:
-    if not iso:
-        return fallback
-    return iso[:16].replace("T", " ") + " UTC"
-
-
-def _quote(part: str) -> str:
-    return f'"{part}"' if " " in part else part
+def _mappings_in(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    value = raw.get("path_mappings", [])
+    return [dict(item) for item in value] if isinstance(value, list) else []

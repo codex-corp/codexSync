@@ -99,10 +99,10 @@ class OverviewScreen(Screen):
         controller = self.host.controller
 
         def go() -> Outcome:
-            state = controller.state()
-            if not state.ok:
-                return Outcome(value=(state, None, None))
-            return Outcome(value=(state, controller.journals(), controller.automation()))
+            # Journals and automation are read whatever the diagnostic says:
+            # an unreadable state is exactly when the last sync and an open
+            # journal are worth seeing (CS-274).
+            return Outcome(value=(controller.state(), controller.journals(), controller.automation()))
 
         self.read(go, _apply_state)
 
@@ -129,10 +129,7 @@ class OverviewScreen(Screen):
         self._render_side()
 
     def _open_automation(self) -> None:
-        self.host.go_to("settings")
-        screen = self.host.screen("settings")
-        if "automation" in screen._tab_ids:
-            screen.tabs.setCurrentIndex(screen._tab_ids.index("automation"))
+        self.host.go_to("automation")
 
     def _open_history(self) -> None:
         self.host.go_to("sync")

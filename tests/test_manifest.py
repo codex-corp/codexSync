@@ -19,10 +19,10 @@ class ManifestTests(unittest.TestCase):
             manifest_path = case_dir / "manifest.json"
             local = {"sessions/a.json": FileMeta("sessions/a.json", Path("/local/sessions/a.json"), 123, 5)}
             cloud = {"sessions/a.json": FileMeta("sessions/a.json", Path("/cloud/sessions/a.json"), 124, 6)}
-            manifest = build_manifest(local, cloud, data_version=1)
+            manifest = build_manifest(local, cloud, data_version=1, machine_id="machine-a")
             save_manifest(manifest, manifest_path)
 
-            loaded = load_manifest(manifest_path, data_version=1)
+            loaded = load_manifest(manifest_path, data_version=1, machine_id="machine-a")
             self.assertIn("sessions/a.json", loaded.files)
             entry = loaded.files["sessions/a.json"]
             assert entry.local is not None

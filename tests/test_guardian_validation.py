@@ -38,8 +38,11 @@ class GuardianValidationTests(unittest.TestCase):
             (b"\xff{}", INVALID_UTF8),
             (b"\xff\xfe{\x00}\x00", UNSUPPORTED_BOM),
             (b"\xff\xfe\x00\x00", UNSUPPORTED_BOM),
-            (b"{}\xef\xbb\xbf", UNSUPPORTED_BOM),
-            (b"\xef\xbb\xbf{}\xef\xbb\xbf", UNSUPPORTED_BOM),
+            # A mark past offset 0 is content, not a BOM (CS-311): outside a
+            # string it is still not JSON, so the state is still refused.
+            (b"{}\xef\xbb\xbf", INVALID_JSON),
+            (b"\xef\xbb\xbf{}\xef\xbb\xbf", INVALID_JSON),
+            (b"\xef\xbb\xbf\xef\xbb\xbf{}", UNSUPPORTED_BOM),
             (b'{"a":1,"a":2}', DUPLICATE_JSON_KEY),
             (b"{} trailing", INVALID_JSON),
             (b"[]", ROOT_NOT_OBJECT),
@@ -50,6 +53,18 @@ class GuardianValidationTests(unittest.TestCase):
                 report = validate_source_observation(self._observation(payload))
                 self.assertEqual(report.status, ValidationStatus.INVALID)
                 self.assertEqual(report.codes, (expected_code,))
+
+    def test_a_zero_width_no_break_space_inside_a_string_is_content(self) -> None:
+        """U+FEFF in a project name is valid JSON, not a byte-order mark (CS-311).
+
+        The whole-file search made one such character quarantine every state and
+        refuse every commit of the global state.
+        """
+        payload = '{"local-projects": {"p": {"name": "a\ufeffb"}}}'.encode("utf-8")
+        self.assertEqual(validate_source_observation(self._observation(payload)).status, ValidationStatus.PASS)
+        with_bom = b"\xef\xbb\xbf" + payload
+        report = validate_source_observation(self._observation(with_bom))
+        self.assertEqual((report.status, report.codes), (ValidationStatus.PASS_WITH_WARNING, (UTF8_BOM,)))
 
     def test_changed_metadata_never_creates_a_partial_snapshot_candidate(self) -> None:
         observation = self._observation(b"{}", size_after=3)

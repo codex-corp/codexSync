@@ -55,6 +55,36 @@ class SessionCatalogTests(unittest.TestCase):
         self.assertIn("INVALID_TAIL", cold.codes)
         self.assertIn("INCOMPLETE_TAIL", live.codes)
 
+    def _scan_with_reparse_tag(self, tag: int):
+        """Scan with ``a.jsonl`` reported as a reparse point carrying ``tag``."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        real_stat = Path.stat
+
+        def fake_stat(path, *, follow_symlinks=True):
+            info = real_stat(path, follow_symlinks=follow_symlinks)
+            if follow_symlinks or path.name != "a.jsonl":
+                return info
+            return SimpleNamespace(
+                st_mode=info.st_mode, st_size=info.st_size, st_mtime=info.st_mtime,
+                st_mtime_ns=info.st_mtime_ns, st_file_attributes=0x400, st_reparse_tag=tag,
+            )
+
+        with mock.patch.object(Path, "stat", fake_stat):
+            return scan_sessions(self.root)
+
+    def test_a_cloud_placeholder_is_an_ordinary_session_file(self) -> None:
+        """CS-325: Yandex.Disk/OneDrive mark synced files as reparse points too."""
+        self._write("sessions/2026/09/a.jsonl", "session-a")
+        catalog = self._scan_with_reparse_tag(0x9000601A)  # IO_REPARSE_TAG_CLOUD_A
+        self.assertEqual([item.session_id for item in catalog.descriptors], ["session-a"])
+
+    def test_a_link_is_still_skipped(self) -> None:
+        self._write("sessions/2026/09/a.jsonl", "session-a")
+        catalog = self._scan_with_reparse_tag(0xA000000C)  # IO_REPARSE_TAG_SYMLINK
+        self.assertEqual(catalog.descriptors, [])
+
     def test_parent_graph_reports_missing_and_cycle(self) -> None:
         self._write("sessions/a.jsonl", "a", parent="missing")
         self._write("sessions/b.jsonl", "b", parent="c")

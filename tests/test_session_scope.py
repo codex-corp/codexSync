@@ -1,6 +1,6 @@
 """The working set: carry one project, mirror everything.
 
-The scenario is a laptop that needs `project-chloya` and none of the other 864
+The scenario is a laptop that needs `project-orion` and none of the other 864
 MiB. Two properties make that safe rather than merely smaller, and both are
 easy to lose:
 
@@ -62,7 +62,7 @@ class ScopeExpansionTests(unittest.TestCase):
         scope = build_session_scope(
             directory(
                 chat("a", "p1"), chat("b", "p1"), chat("c", "p2"),
-                projects={"p1": "chloya", "p2": "other"},
+                projects={"p1": "orion", "p2": "other"},
             ),
             projects=("p1",),
         )
@@ -74,21 +74,21 @@ class ScopeExpansionTests(unittest.TestCase):
     def test_a_project_can_be_named_by_its_name(self) -> None:
         """A person reads names; the plan stores ids."""
         scope = build_session_scope(
-            directory(chat("a", "p1"), projects={"p1": "project-chloya"}),
-            projects=("project-chloya",),
+            directory(chat("a", "p1"), projects={"p1": "project-orion"}),
+            projects=("project-orion",),
         )
         self.assertEqual(scope.projects, ("p1",))
         self.assertEqual(scope.chat_count, 1)
 
     def test_a_name_that_matches_nothing_simply_adds_nothing(self) -> None:
         scope = build_session_scope(
-            directory(chat("a", "p1"), projects={"p1": "chloya"}), projects=("typo",),
+            directory(chat("a", "p1"), projects={"p1": "orion"}), projects=("typo",),
         )
         self.assertEqual(scope.chat_count, 0)
 
     def test_a_chat_can_be_added_on_its_own(self) -> None:
         scope = build_session_scope(
-            directory(chat("a", "p1"), chat("loose", None), projects={"p1": "chloya"}),
+            directory(chat("a", "p1"), chat("loose", None), projects={"p1": "orion"}),
             chats=("loose",),
         )
         self.assertEqual(set(scope.session_hashes), {session_hash("loose")})
@@ -101,7 +101,7 @@ class ScopeExpansionTests(unittest.TestCase):
                 chat("child", None, parent="parent", kind=ChatKind.SUB_THREAD),
                 chat("grandchild", None, parent="child", kind=ChatKind.SUB_THREAD),
                 chat("stranger", None),
-                projects={"p1": "chloya"},
+                projects={"p1": "orion"},
             ),
             projects=("p1",),
         )
@@ -114,10 +114,10 @@ class ScopeExpansionTests(unittest.TestCase):
         """`DERIVED_VIA_MAPPING` is how a chat from the other machine arrives."""
         mapped = ChatEntry(
             "m", "sessions/m.jsonl", SessionState.ACTIVE, ChatKind.TOP_LEVEL,
-            Association.DERIVED_VIA_MAPPING, "p1", None, "D:/work/chloya", 3, None,
+            Association.DERIVED_VIA_MAPPING, "p1", None, "D:/work/orion", 3, None,
         )
         scope = build_session_scope(
-            directory(mapped, projects={"p1": "chloya"}), projects=("p1",),
+            directory(mapped, projects={"p1": "orion"}), projects=("p1",),
         )
         self.assertEqual(scope.chat_count, 1)
 
@@ -128,7 +128,7 @@ class ScopeExpansionTests(unittest.TestCase):
         big = dataclasses.replace(chat("a", "p1"), byte_count=4096)
         small = dataclasses.replace(chat("b", "p1"), byte_count=1024)
         scope = build_session_scope(
-            directory(big, small, projects={"p1": "chloya"}), projects=("p1",),
+            directory(big, small, projects={"p1": "orion"}), projects=("p1",),
         )
         self.assertEqual(scope.total_bytes, 5120)
 
@@ -138,7 +138,7 @@ class ScopeExpansionTests(unittest.TestCase):
 
         placements = ThreadPlacements(PlacementStatus.AVAILABLE, {"a": "sessions/a.jsonl"})
         scope = build_session_scope(
-            directory(chat("a", "p1"), chat("b", "p1"), projects={"p1": "chloya"}),
+            directory(chat("a", "p1"), chat("b", "p1"), projects={"p1": "orion"}),
             projects=("p1",), placements=placements,
         )
         self.assertEqual(scope.not_in_catalog, ("b",))
@@ -150,7 +150,7 @@ class ScopeExpansionTests(unittest.TestCase):
         for status in (PlacementStatus.ABSENT, PlacementStatus.INDETERMINATE):
             with self.subTest(status=status):
                 scope = build_session_scope(
-                    directory(chat("a", "p1"), projects={"p1": "chloya"}),
+                    directory(chat("a", "p1"), projects={"p1": "orion"}),
                     projects=("p1",), placements=ThreadPlacements(status, {}),
                 )
                 self.assertEqual(scope.not_in_catalog, ())
@@ -174,7 +174,7 @@ class ScopeFileTests(unittest.TestCase):
     def test_only_the_choice_is_stored_never_the_expansion(self) -> None:
         """A frozen list of ids would stop covering tomorrow's chat."""
         scope = build_session_scope(
-            directory(chat("a", "p1"), projects={"p1": "chloya"}), projects=("p1",),
+            directory(chat("a", "p1"), projects={"p1": "orion"}), projects=("p1",),
         )
         path = save_session_scope(scope, self.root / "set.json")
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -192,7 +192,7 @@ class ScopeFileTests(unittest.TestCase):
 
     def test_what_is_written_reads_back(self) -> None:
         scope = build_session_scope(
-            directory(chat("a", "p1"), chat("b", None), projects={"p1": "chloya"}),
+            directory(chat("a", "p1"), chat("b", None), projects={"p1": "orion"}),
             projects=("p1",), chats=("b",),
         )
         path = save_session_scope(scope, self.root / "set.json")
@@ -301,12 +301,52 @@ class ScopedPlanTests(unittest.TestCase):
         self.assertEqual(first.plan_id, again.plan_id)
 
     def test_a_plan_without_a_set_keeps_the_id_it_always_had(self) -> None:
-        """An empty scope is left out of the hashed material entirely."""
+        """No working set is left out of the hashed material entirely."""
+        from codexsync.semantic_transfer import _serialise
+
         self.setUpBranches()
         without = self._plan()
-        empty = self._plan(scope=[])
-        self.assertEqual(without.plan_id, empty.plan_id)
         self.assertEqual(without.scope, ())
+        self.assertFalse(without.scope_matches_nothing)
+        payload = _serialise(without)
+        self.assertNotIn("scope", payload)
+        self.assertNotIn("scope_matches_nothing", payload)
+
+    def test_a_set_that_covers_no_session_can_be_applied(self) -> None:
+        """A chosen project with no chats yet expands to nothing.
+
+        That is not "no working set": nothing may be written into `.codex`.
+        The plan used to be built narrowed and rebuilt unnarrowed at apply, so
+        its id could never match and the mirror could never be written.
+        """
+        from codexsync.semantic_transfer import (
+            WORKING_SET_MATCHES_NOTHING, load_transfer_plan, plan_scope, save_transfer_plan,
+        )
+
+        # The mirror is ahead: a write into `.codex`, which the empty set holds back.
+        self._branch(self.local, "kept.jsonl", ["one"])
+        self._branch(self.remote, "kept.jsonl", ["one", "two"])
+        self._branch(self.local, "other.jsonl", ["one"])
+        self._branch(self.remote, "other.jsonl", ["one", "two"])
+
+        def plan(scope):
+            return build_transfer_plan(
+                SessionCatalog([self._descriptor("kept", "kept.jsonl", 1),
+                                self._descriptor("other", "other.jsonl", 1)], {}),
+                SessionCatalog([self._descriptor("kept", "kept.jsonl", 2),
+                                self._descriptor("other", "other.jsonl", 2)], {}),
+                local_root=self.local, remote_root=self.remote,
+                source_machine="desktop", target_machine="laptop",
+                scope=scope,
+            )
+
+        scanned = plan([])
+        self.assertTrue(all(item.action is TransferAction.OUT_OF_SCOPE for item in scanned.items))
+        self.assertIn(WORKING_SET_MATCHES_NOTHING, scanned.codes)
+        saved = load_transfer_plan(save_transfer_plan(scanned, self.root / "plan.json"))
+        rebuilt = plan(plan_scope(saved))
+        self.assertEqual(rebuilt.plan_id, saved.plan_id)
+        self.assertNotEqual(plan(None).plan_id, saved.plan_id)
 
     def test_the_set_survives_saving_and_loading_the_plan(self) -> None:
         from codexsync.semantic_transfer import load_transfer_plan, save_transfer_plan

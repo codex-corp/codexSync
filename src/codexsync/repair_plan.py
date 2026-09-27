@@ -10,7 +10,12 @@ import os
 from pathlib import Path
 from uuid import uuid5, NAMESPACE_URL
 
-from .guardian_schema import binding_project_id, detect_state_schema, project_root_paths
+from .guardian_schema import (
+    binding_project_id,
+    detect_state_schema,
+    project_root_paths,
+    supports_project_creation,
+)
 from .path_mapping import PathMappingError, PathMappingRule, apply_path_mapping, mapping_digest
 from .session_catalog import SessionCatalog, SessionState
 
@@ -22,6 +27,10 @@ class RepairActionKind(str, Enum):
     ADD_BINDING = "ADD_BINDING"
     KEEP_BINDING = "KEEP_BINDING"
     SKIP_UNMAPPED = "SKIP_UNMAPPED"
+    #: The session's folder belongs to no project, and this schema cannot have
+    #: one created for it. Writes nothing; the user creates the project in Codex
+    #: and scans again.
+    SKIP_NO_PROJECT = "SKIP_NO_PROJECT"
     AMBIGUOUS_PROJECT = "AMBIGUOUS_PROJECT"
     UNSUPPORTED_BACKEND = "UNSUPPORTED_BACKEND"
 
@@ -119,6 +128,12 @@ def build_repair_plan(
                     root_text, session.session_id, source_root,
                     hashlib.sha256(source_root.encode("utf-8")).hexdigest(),
                 ))
+            elif not supports_project_creation(schema_id):
+                # Emitting ADD_PROJECT here made every plan on the desktop
+                # schema unappliable (the apply refuses to invent an entry),
+                # including a remap that had nothing to do with this session.
+                actions.append(RepairAction(RepairActionKind.SKIP_NO_PROJECT, session_hash, root_hash, None, mapped.rule_id, root_text, session.session_id))
+                continue
             else:
                 project_id = str(uuid5(NAMESPACE_URL, f"codexsync:{target_machine}:{root_hash}"))
                 actions.append(RepairAction(RepairActionKind.ADD_PROJECT, session_hash, root_hash, project_id, mapped.rule_id, root_text, session.session_id))
@@ -126,7 +141,7 @@ def build_repair_plan(
         binding_kind = RepairActionKind.KEEP_BINDING if assigned == project_id else RepairActionKind.ADD_BINDING
         actions.append(RepairAction(binding_kind, session_hash, root_hash, project_id, mapped.rule_id, root_text, session.session_id))
     actions.extend(_bind_sessions_left_behind_by_a_remap(catalog, actions, assignments, schema_id))
-    codes.extend(_remap_orphan_codes(catalog, actions))
+    codes.extend(_remap_orphan_codes(catalog, actions, assignments, schema_id))
     plan_material = {
         "version": 1,
         "source_machine": source_machine,
@@ -259,6 +274,25 @@ def _existing_project_roots(state: dict, schema_id: str) -> dict[str, tuple[str,
     return result
 
 
+def conflicting_bindings(actions) -> tuple[str, ...]:
+    """Session ids a plan would bind to more than one project.
+
+    Bindings are applied in order, so a second one silently wins; a plan that
+    names two projects for one chat has not decided where the chat belongs.
+    """
+    seen: dict[str, str] = {}
+    conflicts: dict[str, None] = {}
+    for action in actions:
+        if action.kind not in {RepairActionKind.ADD_BINDING, RepairActionKind.KEEP_BINDING}:
+            continue
+        if not action.session_id or not action.project_id:
+            continue
+        previous = seen.setdefault(action.session_id, action.project_id)
+        if previous != action.project_id:
+            conflicts[action.session_id] = None
+    return tuple(conflicts)
+
+
 def _bind_sessions_left_behind_by_a_remap(
     catalog: SessionCatalog,
     actions: list[RepairAction],
@@ -281,6 +315,13 @@ def _bind_sessions_left_behind_by_a_remap(
     binding, the binding is the whole repair. Neither reading has to be settled
     before this is safe, and settling it wrongly would cost the user their
     history.
+
+    A session that already belongs to *another* project — bound to it earlier
+    in this plan (a nested project's root, say) or by an existing assignment —
+    is not taken over: the later binding would silently win and move the chat
+    out of the project it is in. It is left alone, and the orphan check below
+    reports it as ``REMAP_SESSION_BOUND_ELSEWHERE``, which refuses the apply
+    until the user decides where that chat belongs.
     """
     remaps = {
         action.project_id: action
@@ -294,6 +335,11 @@ def _bind_sessions_left_behind_by_a_remap(
         for action in actions
         if action.kind in {RepairActionKind.ADD_BINDING, RepairActionKind.KEEP_BINDING}
     }
+    owner = {
+        action.session_id: action.project_id
+        for action in actions
+        if action.kind in {RepairActionKind.ADD_BINDING, RepairActionKind.KEEP_BINDING}
+    }
     extra: list[RepairAction] = []
     for project_id, remap in sorted(remaps.items()):
         for session in catalog.valid:
@@ -301,8 +347,11 @@ def _bind_sessions_left_behind_by_a_remap(
                 continue
             if (session.session_id, project_id) in bound:
                 continue
-            bound.add((session.session_id, project_id))
             assigned = binding_project_id(schema_id, assignments.get(session.session_id))
+            if _belongs_elsewhere(owner.get(session.session_id), assigned, project_id):
+                continue
+            bound.add((session.session_id, project_id))
+            owner[session.session_id] = project_id
             extra.append(RepairAction(
                 RepairActionKind.KEEP_BINDING if assigned == project_id else RepairActionKind.ADD_BINDING,
                 hashlib.sha256(session.session_id.encode("utf-8")).hexdigest(),
@@ -311,7 +360,19 @@ def _bind_sessions_left_behind_by_a_remap(
     return extra
 
 
-def _remap_orphan_codes(catalog: SessionCatalog, actions: list[RepairAction]) -> list[str]:
+def _belongs_elsewhere(planned: str | None, assigned: str | None, project_id: str) -> bool:
+    """Whether a session is already bound, in the plan or the state, to another project."""
+    return (planned is not None and planned != project_id) or (
+        assigned is not None and assigned != project_id
+    )
+
+
+def _remap_orphan_codes(
+    catalog: SessionCatalog,
+    actions: list[RepairAction],
+    assignments: dict,
+    schema_id: str,
+) -> list[str]:
     """Refuse a remap that would still leave a session behind.
 
     The pass above is meant to make this impossible, which is exactly why it is
@@ -320,6 +381,10 @@ def _remap_orphan_codes(catalog: SessionCatalog, actions: list[RepairAction]) ->
     loss of history. Sessions the catalog already rejected are out of scope
     here, as they are everywhere else in this planner: they carry no usable id,
     so no binding could name them.
+
+    An uncovered session that already belongs to another project is reported
+    as ``REMAP_SESSION_BOUND_ELSEWHERE`` rather than as an orphan: it is not
+    lost, but the plan cannot both keep it where it is and cover the remap.
     """
     codes: list[str] = []
     bound = {
@@ -327,16 +392,25 @@ def _remap_orphan_codes(catalog: SessionCatalog, actions: list[RepairAction]) ->
         for action in actions
         if action.kind in {RepairActionKind.ADD_BINDING, RepairActionKind.KEEP_BINDING}
     }
+    owner = {
+        action.session_id: action.project_id
+        for action in actions
+        if action.kind in {RepairActionKind.ADD_BINDING, RepairActionKind.KEEP_BINDING}
+    }
     for action in actions:
-        if action.kind is not RepairActionKind.REMAP_ROOT:
+        if action.kind is not RepairActionKind.REMAP_ROOT or not action.project_id:
             continue
         for session in catalog.valid:
             if not session.session_id or not _under(session.cwd, action.source_root):
                 continue
-            if (session.session_id, action.project_id) not in bound:
+            if (session.session_id, action.project_id) in bound:
+                continue
+            assigned = binding_project_id(schema_id, assignments.get(session.session_id))
+            if _belongs_elsewhere(owner.get(session.session_id), assigned, action.project_id):
+                codes.append("REMAP_SESSION_BOUND_ELSEWHERE")
+            else:
                 codes.append("REMAP_ORPHANS_SESSIONS")
-                return codes
-    return codes
+    return list(dict.fromkeys(codes))
 
 
 def _under(path: str | None, root: str | None) -> bool:

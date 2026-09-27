@@ -21,7 +21,9 @@ compression = "none"             # none | zip
 - 备份放在 `paths.backup_dir` 下，形式是目录树（`none`）或单个 `.zip` 文件（`zip`）。
 - 每份新备份都带着一份经过校验的 `codexsync-backup-v1` 清单。自动还原只会挑选带清单
   且已提交的备份。
-- 备份按 `retention_days` 和 `max_backups` 清理。唯一的例外是**冲突包** —— 会话分叉中
+- 备份按 `retention_days` 和 `max_backups` 清理——只清理这台机器自己的快照：不清理
+  另一台机器的快照或只是放在 `backup_dir` 里的文件夹，也永远不清理这台机器上某个未完成的
+  操作在 [`recover`](#被中断的写操作) 时仍需要的快照。唯一的例外是**冲突包** —— 会话分叉中
   落选的那个分支 —— 它位于 `semantic.root_dir` 下，永远不会被清理，因此分叉的历史不会
   只存在于一个会过期的地方。
 
@@ -69,14 +71,26 @@ codexsync -c config.toml recover resume <操作标识> --apply
 **回滚** —— 还原该操作在写入任何内容之前创建的备份：
 
 ```powershell
-codexsync -c config.toml recover rollback <操作标识> --target cloud
-codexsync -c config.toml recover rollback <操作标识> --target cloud --apply
+codexsync -c config.toml recover rollback <操作标识>
+codexsync -c config.toml recover rollback <操作标识> --apply
 ```
 
-- `--target`（`local` 或 `cloud`）必须给出，永远不会被推断：一次同步可能备份了两侧的
-  文件，而备份清单只记录相对路径，因此仅凭备份无法证明是哪一侧。
+- 每个文件都回到它被备份时所在的一侧：一次同步会备份两侧的文件，而备份记录了每个文件
+  属于哪一侧。`--target`（`local` 或 `cloud`）可以不给；给出时，它必须是备份中唯一的
+  一侧，否则回滚会被拒绝，而不是把文件写进错误的根目录。只有当一次 `restore` 的备份写于
+  开始记录侧别之前时才需要它；来自 `sync` 的这种备份会被拒绝 —— 请用 `restore --from`
+  手动还原。
+- 全局状态（在 `chats move`、`repair-projects apply`、`project-move apply` 或 Guardian
+  还原之后）通过与原操作同样谨慎的写入放回：先对当前文件做经过校验的备份，再验证，再做
+  进程检查。
+- `sessions apply` 不做回滚：请用 `resume`，然后重新 scan 和 apply。一次传输只会延长一段
+  历史，或者把被替换的分支保存在冲突包里，所以重做不会丢失任何东西。
 - 两条命令都默认是试运行，并且都要求 Codex 关闭。
-- `rollback` 只有在备份对照它已提交的清单校验通过之后才会释放日志，因此跑不起来的回滚
-  会让阻塞原样保留。
-- 没有已提交清单的备份，恰恰证明提交阶段从未开始 —— 备份集是在第一次替换之前盖章的 ——
-  所以没有什么需要撤销，日志直接关闭即可。
+- `rollback` 会在释放日志之前检查一切可能导致拒绝的东西 —— 备份对照它已提交的清单、侧别、
+  全局状态是否有效 —— 因此跑不起来的回滚会让阻塞原样保留。
+- 如果日志指名的备份已经不在了（被保留期限删除，可能是共用备份文件夹的另一台机器删的），
+  回滚会被拒绝：已经无法证明替换过什么。`resume` 仍然可以关闭日志。
+- 从未进入提交阶段的日志，或者没有已提交清单的备份，都证明什么也没有被替换 —— 两者都在
+  第一次替换之前记录 —— 所以没有什么需要撤销，日志直接关闭即可。
+- 同一个 Codex 文件夹同一时间只能有一条会写入的命令在工作，不论它是哪一种；第二条会以
+  退出码 `5` 停下，而不是把自己的写入和前一条交错在一起。

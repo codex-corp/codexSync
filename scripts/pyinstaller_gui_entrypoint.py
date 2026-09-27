@@ -11,7 +11,9 @@ The rule is deliberately narrow: the arguments name a CLI command exactly when
 their first positional token (skipping the value of an option that takes one,
 such as ``-c``) is one of the command names ``cli.build_parser()`` defines.
 Both sets are read from that parser, so a command added to the CLI is routed
-here without anyone remembering this file.
+here without anyone remembering this file. So is a top-level ``--help`` or
+``--version`` (``-h``/``-V``): the window's own parser knows neither, and
+``codexsync-gui.exe --version`` used to exit 2 with no window and no answer.
 """
 from __future__ import annotations
 
@@ -35,16 +37,21 @@ def ensure_standard_streams() -> None:
             setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
 
 
-def _parser_shape(parser: argparse.ArgumentParser) -> tuple[frozenset[str], frozenset[str]]:
-    """(command names, top-level option strings that consume a value)."""
+def _parser_shape(
+    parser: argparse.ArgumentParser,
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """(command names, top-level options that consume a value, help/version options)."""
     commands: set[str] = set()
     valued: set[str] = set()
+    answers: set[str] = set()
     for action in parser._actions:  # argparse exposes no public walk
         if isinstance(action, argparse._SubParsersAction):
             commands.update(action.choices)
+        elif isinstance(action, (argparse._HelpAction, argparse._VersionAction)):
+            answers.update(action.option_strings)
         elif action.option_strings and action.nargs != 0:
             valued.update(action.option_strings)
-    return frozenset(commands), frozenset(valued)
+    return frozenset(commands), frozenset(valued), frozenset(answers)
 
 
 def is_cli_invocation(argv: Sequence[str], parser: argparse.ArgumentParser | None = None) -> bool:
@@ -52,12 +59,14 @@ def is_cli_invocation(argv: Sequence[str], parser: argparse.ArgumentParser | Non
         from codexsync.cli import build_parser
 
         parser = build_parser()
-    commands, valued = _parser_shape(parser)
+    commands, valued, answers = _parser_shape(parser)
     tokens = iter(argv)
     for token in tokens:
         if token == "--":
             token = next(tokens, None)
             return token in commands
+        if token in answers:
+            return True
         if token.startswith("-") and token != "-":
             # `-c value` / `--config value` consume the next token; the
             # attached spellings `--config=value` and `-cvalue` do not.

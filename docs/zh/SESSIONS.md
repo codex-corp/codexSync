@@ -17,7 +17,11 @@
 - 任一方向的**快进** —— 一侧是另一侧的前缀，于是较长的那侧可以直接取代它；
 - **活动 ↔ 归档的转变** —— 同一段历史在 `sessions/` 与 `archived_sessions/` 之间
   搬了位置；
-- **分叉** —— 两侧各自添加了不同的记录。
+- **分叉** —— 两侧各自添加了不同的记录；
+- **无法使用的副本**（`BLOCKED_INVALID_BRANCH`）—— 无法读取、被截断，或同一个会话
+  标识出现在两个文件里（`LOCAL_DUPLICATE_SESSION_ID`、`REMOTE_DUPLICATE_SESSION_ID`），
+  或者副本会落到一个不属于该会话的文件上（`DESTINATION_OCCUPIED`）。这样的副本绝不会被
+  当作不存在：在文件能被正常读取之前，这个会话的任何一侧都不会被写入，其他会话也不会因此停下。
 
 ```powershell
 codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --save-plan sessions-plan.json
@@ -31,10 +35,11 @@ codexsync -c config.toml sessions scan --source-machine desktop --target-machine
 只需要一个项目的笔记本，不必把每个会话都带上：
 
 ```powershell
-codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --project project-chloya --save-scope --save-plan sessions-plan.json
+codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --project project-orion --save-scope --save-plan sessions-plan.json
 ```
 
-- `--project` 和 `--chat` 可以重复给出；`--scope-file` 读取之前保存的集合；
+- `--project` 和 `--chat` 可以重复给出；`--scope-file` 读取之前保存的集合（文件不存在
+  或不是已保存的集合时，扫描以退出码 `4` 停下，而不是丢掉这个集合）；
   `--save-scope` 把这次的集合按机器对保存在
   `plans/sessions-scope-<从>-<到>.json` 中。
 - 一个项目意味着它的全部对话 —— 固定的、按路径找到的，或者靠某条 `[[path_mappings]]`
@@ -44,7 +49,9 @@ codexsync -c config.toml sessions scan --source-machine desktop --target-machine
 - **工作集是计划标识的一部分**，因此一份计划不可能在另一个工作集之下被执行。
 
 被留下的会话会报告为 `OUT_OF_SCOPE`。它不阻止任何事，并且带着「本来会是什么」
-（`WOULD_BE_…`），所以汇总会说明什么被留下了，而不是把它略去。
+（`WOULD_BE_…`），所以汇总会说明什么被留下了，而不是把它略去。一个一个会话都不覆盖的
+工作集——比如一个还没有对话的项目——不会往 `.codex` 写入任何东西，并被标记为
+`WORKING_SET_MATCHES_NOTHING`；镜像仍然会被完整写入。
 
 工作文件夹在本机不存在的对话——通常是放在同步文件夹之外的项目——会被标记为
 `CWD_ABSENT_HERE`，`sessions scan` 会在 `cwd_absent_here` 中统计这类对话的数量。
@@ -63,7 +70,13 @@ codexsync -c config.toml sessions resolve --plan sessions-plan.json --conflict <
 codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --resolutions resolutions.json --save-plan sessions-plan.json
 ```
 
-`--choice` 可以是 `KEEP_LOCAL`、`KEEP_REMOTE` 或 `DEFER`。一个决定被钉在两个分支的
+`--choice` 可以是 `KEEP_LOCAL`、`KEEP_REMOTE` 或 `DEFER`。`DEFER` 让冲突保持未决，而
+未决的冲突会拒绝**整个** `sessions apply`，而不只是那一个会话 —— 只推迟那些你会在下一次
+apply 之前决定的冲突。`sessions scan` 恰好在计划里含有这样的决定（冲突或目标撞车）时以
+退出码 `2` 结束；只因布局未经验证或因 SQLite 目录而被阻止的会话，会被 apply 跳过，也不
+改变退出码。
+
+一个决定被钉在两个分支的
 确切字节上：如果其中任何一侧之后发生变化，这个决定会以 `STALE_RESOLUTION` 被拒绝，
 而不会被套用到你从未见过的历史上。
 
@@ -78,7 +91,7 @@ codexsync -c config.toml sessions scan --source-machine desktop --target-machine
 与其中的每个会话都不一致。
 
 这类冲突会被标记为 `FORMAT_MIGRATION`，并附带 `NEWER_FORMAT_LOCAL` 或
-`NEWER_FORMAT_REMOTE`；只要有一侧仍是旧格式，`doctor` 就会给出警告（`session_format`）。
+`NEWER_FORMAT_REMOTE`（只有内容上的分叉会被这样标记，缺少共同基础的冲突不会）；只要有一侧仍是旧格式，`doctor` 就会给出警告（`session_format`）。
 它仍然是冲突——两份副本并不是同一段历史——但一个决定即可覆盖全部：
 
 ```powershell
@@ -106,10 +119,12 @@ codexsync -c config.toml sessions apply --plan sessions-plan.json --confirm-plan
 
 - 一个分支是**整体**传输的：不会往目标上追加内容，也不会交错任何历史。来源只被读取；
   目标在被替换之前已经存在于一份经过校验的备份里。
-- 在某个决定中落选的分支，还会保存在 `semantic.root_dir` 下一个不可变的**冲突包**中。
+- 在某个决定中落选的分支，还会保存在 `semantic.root_dir` 下一个不可变的**冲突包**中，
+  位于 `conflicts/<冲突标识>`——也就是你做决定时用的那个标识——两份副本在提交前都会重新校验哈希。
   备份会按保留期过期；正是这个冲突包保证了分叉的历史不会只存在于一个会过期的地方。
 - 执行**按设计就是部分的**。冲突或目标位置冲突会让整份计划停下来，因为每一个都指向只有
-  你才能做的决定。因布局未经验证或因 SQLite 目录而被挡住的条目，会被报告出来并原地不动。
+  你才能做的决定。因布局未经验证、因 SQLite 目录或因副本无法使用而被挡住的条目，会被报告
+  出来并原地不动。
 - 活动 ↔ 归档的转变在 0.2 里只报告、不执行：这种搬移需要一次删除，而 codexSync 从不删除
   会话文件。
 
@@ -123,8 +138,10 @@ Codex 运行时到哪里去找会话文件，是那个运行时自己的属性�
 - **Codex 线程目录（`state_*.sqlite`）中恰好指向该文件的一行记录。** codexSync 不写
   SQLite，因此目录从未听说过的会话无法被显示出来，会报告为 `UNSUPPORTED_STATE_BACKEND`。
 
-写**向云文件夹**不受这道关卡限制：没有任何 Codex 读取那份副本，因此分支保留它在本地的
-相对路径。正是这一点，让过期或缺失的镜像可以被重建出来。
+写**向云文件夹**不受这道关卡限制：没有任何 Codex 读取那份副本，因此镜像中还没有的分支
+保留它在本地的相对路径。镜像中已有的分支则在原处被改写，即使本地副本放在别处——这里已归档，
+镜像中仍是活动的（`MIRROR_PATH_KEPT`）——因为同一个会话的第二个文件会让两者都从之后的每份
+计划中消失。正是这一点，让过期或缺失的镜像可以被重建出来。
 
 ## 云端镜像
 

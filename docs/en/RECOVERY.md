@@ -23,7 +23,10 @@ compression = "none"             # none | zip
   `.zip` file (`zip`).
 - Every new backup carries a verified `codexsync-backup-v1` manifest. An automatic
   restore picks only committed backups with a manifest.
-- Backups are pruned by `retention_days` and `max_backups`. The one exception is a
+- Backups are pruned by `retention_days` and `max_backups` — only this machine's
+  own snapshots, never another machine's or a folder that merely sits in
+  `backup_dir`, and never a snapshot an unfinished operation of this machine
+  still needs for [`recover`](#interrupted-mutations). The one exception is a
   **conflict bundle** — the losing branch of a session divergence — which lives
   under `semantic.root_dir` and is never pruned, so a divergent history is never
   the only copy in something that expires.
@@ -76,16 +79,32 @@ the command can run again.
 **Roll back** — restore the backup that operation created before it wrote anything:
 
 ```powershell
-codexsync -c config.toml recover rollback <operation-id> --target cloud
-codexsync -c config.toml recover rollback <operation-id> --target cloud --apply
+codexsync -c config.toml recover rollback <operation-id>
+codexsync -c config.toml recover rollback <operation-id> --apply
 ```
 
-- `--target` (`local` or `cloud`) is required and never inferred: one sync can
-  back up files from both sides, and the backup manifest records only relative
-  paths, so the side cannot be proven from the backup alone.
+- Each file goes back to the side it was backed up from: one sync backs up files
+  of both sides, and the backup records the side of each one. `--target`
+  (`local` or `cloud`) is optional; given, it must be the only side the backup
+  holds, or the rollback is refused rather than writing a file into the wrong
+  root. It is needed only for a `restore` whose backup was written before sides
+  were recorded; such a backup from a `sync` is refused — restore it by hand
+  with `restore --from`.
+- The global state (after `chats move`, `repair-projects apply`, `project-move
+  apply` or a Guardian restore) goes back through the same careful write as the
+  original: verified backup of the current file, validation, process check.
+- A `sessions apply` is not rolled back: use `resume`, then scan and apply again.
+  A transfer only ever extends a history or keeps the branch it replaced in a
+  conflict bundle, so re-running it loses nothing.
 - Both commands default to a dry run and require Codex to be closed.
-- `rollback` releases the journal only after the backup has been verified against
-  its committed manifest, so a rollback that cannot run leaves the block in place.
-- A backup with no committed manifest proves the commit phase was never entered —
-  the backup set is stamped before the first replace — so there is nothing to undo
-  and the journal is simply closed.
+- `rollback` checks everything that could refuse — the backup against its
+  committed manifest, the sides, the global state's validity — before it releases
+  the journal, so a rollback that cannot run leaves the block in place.
+- If the backup the journal names is gone (removed by retention, possibly by
+  another machine sharing the backup folder), the rollback is refused: what was
+  replaced can no longer be proven. `resume` still closes the journal.
+- A journal that never reached its commit phase, or a backup with no committed
+  manifest, proves nothing was replaced — both are recorded before the first
+  replace — so there is nothing to undo and the journal is simply closed.
+- Only one writing command works on one Codex folder at a time, whatever its
+  kind; a second one stops with exit code `5` instead of interleaving its writes.

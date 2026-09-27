@@ -14,9 +14,9 @@ from __future__ import annotations
 from PySide6.QtWidgets import QComboBox
 
 from ..controller import Outcome
-from ..widgets import Banner, Cell, button, card, fill_table, label, row, selected_data, set_tone, table
+from ..widgets import Banner, Cell, button, card, fill_table, human_size, label, row, selected_data, set_tone, table
 from .base import Model, Screen
-from .guardian import _size, _when
+from .guardian import _when
 
 
 class BackupsModel(Model):
@@ -166,7 +166,7 @@ class BackupsScreen(Screen):
                     Cell(snap.machine or "—"),
                     Cell(status, tone=tone, tooltip=snap.problem),
                     Cell(str(snap.entries) if snap.entries is not None else "—"),
-                    Cell(_size(snap.total_bytes) if snap.total_bytes is not None else "—"),
+                    Cell(human_size(snap.total_bytes) if snap.total_bytes is not None else "—"),
                     Cell("zip" if snap.compressed else self.t("backups.format.folder"), muted=True),
                     Cell(snap.name, muted=True),
                 ])

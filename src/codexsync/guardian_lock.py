@@ -9,7 +9,7 @@ import sys
 from typing import BinaryIO
 from uuid import uuid4
 
-from .exceptions import GuardianBusyError
+from .exceptions import GuardianBusyError, GuardianIntegrityError
 from .guardian_models import GUARDIAN_LOCKS_DIR_NAME, require_guardian_machine_id
 
 
@@ -24,8 +24,21 @@ class GuardianWriterLock(AbstractContextManager["GuardianWriterLock"]):
         self._handle: BinaryIO | None = None
 
     def acquire(self) -> "GuardianWriterLock":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+b")
+        """Take the lock or raise a Guardian error; never leave a handle behind.
+
+        Every step that can fail is inside the guard (CS-314): opening the file
+        can raise ``PermissionError`` on Windows while another process or a
+        cloud client holds it, and a failed metadata write after the lock was
+        taken used to leak a locked handle for the life of the process.
+        """
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise GuardianIntegrityError(f"Cannot create the Guardian lock directory: {self.path.parent}") from exc
+        try:
+            handle = self.path.open("a+b")
+        except OSError as exc:
+            raise GuardianBusyError(f"Guardian writer lock cannot be opened for machine {self.machine_id}") from exc
         try:
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
@@ -38,7 +51,11 @@ class GuardianWriterLock(AbstractContextManager["GuardianWriterLock"]):
             handle.close()
             raise GuardianBusyError(f"Guardian writer lock is busy for machine {self.machine_id}") from exc
         self._handle = handle
-        self._write_metadata()
+        try:
+            self._write_metadata()
+        except OSError as exc:
+            self.release()
+            raise GuardianIntegrityError(f"Cannot record the Guardian lock owner for machine {self.machine_id}") from exc
         return self
 
     def release(self) -> None:

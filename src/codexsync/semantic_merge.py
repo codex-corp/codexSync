@@ -90,11 +90,13 @@ def canonical_digest(raw: bytes) -> str | None:
     record is refused when it is not a JSON object, or contains a float (whose
     textual form is not a reliable identity), or a string that is not already
     NFC-normalised (where two spellings would compare equal to a human and
-    unequal to the runtime, or the reverse).
+    unequal to the runtime, or the reverse), or an object that repeats a key:
+    parsing keeps only the last value, so ``{"k":1,"k":2}`` would otherwise
+    collapse into ``{"k":2}`` -- a different record by its bytes.
     """
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_without_repeats)
+    except (UnicodeError, json.JSONDecodeError, _RepeatedKey):
         return None
     if not isinstance(value, dict):
         return None
@@ -104,6 +106,17 @@ def canonical_digest(raw: bytes) -> str | None:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(CANONICAL_DIGEST_VERSION.encode("ascii") + b"\0" + encoded).hexdigest()
+
+
+class _RepeatedKey(ValueError):
+    """An object names one key twice, so its meaning is not its parsed value."""
+
+
+def _object_without_repeats(pairs: list[tuple[str, object]]) -> dict:
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise _RepeatedKey("repeated key")
+    return value
 
 
 def _canonicalisable(value: object) -> bool:

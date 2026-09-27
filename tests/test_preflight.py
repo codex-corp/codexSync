@@ -137,6 +137,55 @@ class PreflightTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def _stopped_preflight(self, config_path: Path):
+        with patch(
+            "codexsync.runtime.collect_process_snapshot",
+            return_value=ProcessSnapshot(main_processes=[], subprocesses=[], sandbox_detected=False),
+        ):
+            return run_preflight(config_path)
+
+    def test_an_unfinished_mutation_is_a_failure(self) -> None:
+        """CS-316: doctor said PASS while every `sync --apply` exited 5."""
+        from codexsync.mutation_journal import JournalState, JournalStore
+
+        root = Path.cwd() / "test-sandbox" / f"preflight-journal-{uuid.uuid4().hex}"
+        root.mkdir(parents=True, exist_ok=False)
+        self.addCleanup(shutil.rmtree, root, True)
+        config_path = _write_config(root)
+        store = JournalStore(root / ".tmp")
+        closed = store.begin("sync", "a" * 64, 1)
+        store.transition(closed, JournalState.FAILED)
+        report = self._stopped_preflight(config_path)
+        check = next(item for item in report.checks if item.name == "mutation_journal")
+        self.assertEqual(check.status, "PASS")
+
+        pending = store.begin("chats", "b" * 64, 1)
+        store.transition(pending, JournalState.BACKED_UP)
+        before = sorted(p.name for p in store.root.iterdir())
+        report = self._stopped_preflight(config_path)
+        check = next(item for item in report.checks if item.name == "mutation_journal")
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn(pending.operation_id, check.details)
+        self.assertFalse(report.is_ok)
+        self.assertEqual(sorted(p.name for p in store.root.iterdir()), before, "doctor writes nothing")
+
+        (store.root / "broken.json").write_text("{", encoding="utf-8")
+        check = next(item for item in self._stopped_preflight(config_path).checks if item.name == "mutation_journal")
+        self.assertEqual(check.status, "FAIL")
+
+    def test_a_temp_dir_that_is_a_file_is_reported_not_raised(self) -> None:
+        root = Path.cwd() / "test-sandbox" / f"preflight-tempfile-{uuid.uuid4().hex}"
+        root.mkdir(parents=True, exist_ok=False)
+        self.addCleanup(shutil.rmtree, root, True)
+        config_path = _write_config(root)
+        (root / ".tmp").rmdir()
+        (root / ".tmp").write_text("not a directory", encoding="utf-8")
+        report = self._stopped_preflight(config_path)
+        by_name = {item.name: item.status for item in report.checks}
+        self.assertEqual(by_name["temp_dir"], "FAIL")
+        self.assertIn("orphan_temp_files", by_name)
+        self.assertIn("mutation_journal", by_name)
+
     def test_doctor_reports_running_codex_without_mutating(self) -> None:
         root = Path.cwd() / "test-sandbox" / f"preflight-process-{uuid.uuid4().hex}"
         root.mkdir(parents=True, exist_ok=False)

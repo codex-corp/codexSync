@@ -3,7 +3,29 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .config import require_outside_state_dir
 from .exceptions import ConfigError
+from .models import AppConfig
+
+
+def locate_local_state_dir(cfg: AppConfig) -> Path:
+    """The Codex state folder this config works on, proven clear of its own folders.
+
+    Use this, not `detect_local_state_dir`, wherever a config is at hand: the
+    fallback to CODEX_HOME or ~/.codex can land on a folder config validation
+    never compared with the backup, temp, mirror, Guardian or copy folders.
+    """
+    state_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    require_outside_state_dir(cfg, state_dir)
+    return state_dir
+
+
+def locate_state_dirs(cfg: AppConfig) -> tuple[Path, Path]:
+    """`resolve_state_dirs` with the same proof as `locate_local_state_dir`."""
+    # The overlap first: a mirror inside `.codex` is the reason, not its absence.
+    local = locate_local_state_dir(cfg)
+    _, cloud = resolve_state_dirs(local, cfg.paths.cloud_root_dir)
+    return local, cloud
 
 
 def resolve_state_dirs(local_state_dir: Path | None, cloud_root_dir: Path) -> tuple[Path, Path]:

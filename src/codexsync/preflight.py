@@ -23,13 +23,15 @@ from .guardian_schema import validate_global_state_references
 from .manifest import load_manifest
 from .models import AppConfig
 from .config_migrate import BLOCKER, inspect_config, read_config_source
+from .exceptions import FailSafeError
+from .mutation_journal import JournalStore
 from .runtime import _make_safety_gate
 from .safety_gate import OperationKind, ProcessState
 from .session_catalog import peek_record_formats, scan_sessions
 from .session_index import SESSION_INDEX_FILE, parse_session_index
 from .sqlite_audit import audit_sqlite
 from .project_registry import PROVEN_PROJECT_REGISTRY, registry_note
-from .state_locator import resolve_state_dirs
+from .state_locator import locate_state_dirs
 from .sync_engine import STAGE_DIR_PREFIXES
 
 LOG = logging.getLogger(__name__)
@@ -74,7 +76,7 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
     local_dir: Path | None = None
     cloud_dir: Path | None = None
     try:
-        local_dir, cloud_dir = resolve_state_dirs(cfg.paths.local_state_dir, cfg.paths.cloud_root_dir)
+        local_dir, cloud_dir = locate_state_dirs(cfg)
         checks.append(PreflightCheckResult("state_dirs", "PASS", f"local={local_dir}; cloud={cloud_dir}"))
     except Exception as exc:
         checks.append(PreflightCheckResult("state_dirs", "FAIL", f"State directories are not ready: {exc}"))
@@ -90,7 +92,9 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
     checks.append(_check_path_available("temp_dir", cfg.paths.temp_dir))
 
     try:
-        _ = load_manifest(cfg.state.manifest_file, cfg.state.data_version)
+        _ = load_manifest(
+            cfg.state.manifest_file, cfg.state.data_version, machine_id=cfg.identity.machine_id
+        )
         checks.append(PreflightCheckResult("manifest", "PASS", "Manifest data version is compatible"))
     except Exception as exc:
         checks.append(PreflightCheckResult("manifest", "FAIL", f"Manifest check failed: {exc}"))
@@ -122,6 +126,7 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
         checks.append(_check_global_state_schema(local_dir, cfg))
         checks.append(_check_guardian_latest_good(cfg))
     checks.append(_check_orphan_temp_files(cfg.paths.temp_dir))
+    checks.append(_check_mutation_journals(cfg.paths.temp_dir))
 
     return PreflightReport(checks=checks)
 
@@ -387,9 +392,42 @@ def _shrinks_quarantined_since(root: Path, machine: str, snapshot: Path) -> int:
     return count
 
 
+def _check_mutation_journals(temp_dir: Path) -> PreflightCheckResult:
+    """Say that an unfinished mutation blocks every write, before one is tried.
+
+    `JournalStore.begin` refuses while any journal is non-terminal, so without
+    this `doctor` reported all PASS and the next `sync --apply` exited 5
+    (CS-316). A FAIL, like a config blocker: nothing can be written until the
+    journal is settled with `recover`. Only reads the journal files.
+    """
+    store = JournalStore(temp_dir)
+    try:
+        pending = store.non_terminal()
+    except FailSafeError:
+        return PreflightCheckResult(
+            "mutation_journal", "FAIL",
+            f"A mutation journal in {store.root} cannot be read, and it blocks every mutation; "
+            "`recover inspect` on it, or the Recovery screen, shows what is left",
+        )
+    except OSError as exc:
+        return PreflightCheckResult("mutation_journal", "WARN", f"Cannot read mutation journals: {exc}")
+    if pending:
+        first = pending[0]
+        return PreflightCheckResult(
+            "mutation_journal", "FAIL",
+            f"{len(pending)} unfinished mutation(s) block every write; the first is {first.family} "
+            f"{first.operation_id} ({first.state.value}). Run `recover inspect {first.operation_id}`, "
+            "then `recover resume` or `recover rollback`",
+        )
+    return PreflightCheckResult("mutation_journal", "PASS", "No unfinished mutation")
+
+
 def _check_orphan_temp_files(temp_dir: Path) -> PreflightCheckResult:
     if not temp_dir.exists():
         return PreflightCheckResult("orphan_temp_files", "PASS", "Temp directory does not exist yet")
+    if not temp_dir.is_dir():
+        # `temp_dir` already FAILs as "not a directory"; walking it would raise.
+        return PreflightCheckResult("orphan_temp_files", "WARN", f"Temp path is not a directory: {temp_dir}")
     orphans = [path for path in temp_dir.rglob("*.tmp") if path.is_file()]
     # A staging *directory* is an orphan too, and a heavier one: `restore`
     # extracts a whole snapshot into it. Counting only files reported "no

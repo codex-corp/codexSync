@@ -19,6 +19,7 @@ import unittest
 from codexsync.exceptions import ConfigError, ConflictError, FailSafeError
 from codexsync.guardian_models import SourceObservation, ValidationStatus
 from codexsync.guardian_restore import (
+    LIVE_SCHEMA_UNKNOWN,
     NOTHING_TO_RESTORE,
     PROJECT_IDS_REPLACED,
     SCHEMA_CHANGED,
@@ -188,6 +189,29 @@ class GuardianRestorePlanTests(unittest.TestCase):
         plan, _ = self._plan(snapshot.snapshot_id, self.current)
 
         self.assertIn(SCHEMA_CHANGED, plan.codes)
+
+    def test_a_live_state_in_an_unrecognised_shape_is_not_overwritten(self) -> None:
+        """A newer desktop build's shape is not damage (CS-325).
+
+        Before, an unrecognised live schema had no schema id to compare, so the
+        restore went ahead and put an older shape under a runtime that had
+        moved on. A document with no project state at all stays restorable.
+        """
+        snapshot = self._commit(self.good)
+        newer = _payload(_electron_state(**{
+            "thread-project-assignments": {"t1": {"projectKind": "cloud-v3", "projectId": "p1"}},
+        }))
+        self.assertIsNone(validate_global_state_references(newer).schema_id)
+
+        plan, payload = self._plan(snapshot.snapshot_id, newer)
+
+        self.assertIn(LIVE_SCHEMA_UNKNOWN, plan.codes)
+        with self.assertRaises(ConflictError):
+            verify_restore_still_valid(
+                plan, root_dir=self.guardian_root, current_state=newer, confirm_plan=plan.plan_id
+            )
+        plan, _ = self._plan(snapshot.snapshot_id, _payload({"window": {"w": 1}}))
+        self.assertEqual(plan.codes, ())
 
     def test_a_snapshot_whose_project_ids_were_all_replaced_is_refused(self) -> None:
         """Codex re-created every project since the snapshot: restoring it would drop them all."""

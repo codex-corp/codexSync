@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
+import re
 import shutil
 from pathlib import Path
 
-from .guardian_accept import SHRINK_ACCEPTED
+from .guardian_accept import ACCEPTED_MARKERS
 from .guardian_manifest import load_guardian_manifest, verify_guardian_snapshot
 from .guardian_models import (
     GUARDIAN_COMMITTED_NAME,
     GUARDIAN_MANIFEST_NAME,
+    GUARDIAN_PAYLOAD_NAME,
     GUARDIAN_QUARANTINE_DIR_NAME,
     GUARDIAN_SNAPSHOTS_DIR_NAME,
     GUARDIAN_STAGING_DIR_NAME,
@@ -28,8 +31,8 @@ def prune_snapshots(
 ) -> list[str]:
     """Prune only verified snapshots, never latest-good or its predecessor.
 
-    Also never a snapshot a person accepted over a suspicious shrink, nor the
-    baseline it overrode (``guardian_accept``). Both are rare, and the second
+    Also never a snapshot a person accepted over a suspicious shrink or a
+    schema change, nor the baseline it overrode (``guardian_accept``). Both are rare, and the second
     is the only record of what the state looked like before the drop.
     """
     if retention_days < 0 or max_snapshots < 0:
@@ -53,7 +56,7 @@ def prune_snapshots(
         except Exception:
             continue
         entries.append((created, snapshot))
-        if SHRINK_ACCEPTED in manifest.validation_codes:
+        if ACCEPTED_MARKERS.intersection(manifest.validation_codes):
             decisions.add(manifest.snapshot_id)
             if manifest.previous_good_snapshot_id is not None:
                 decisions.add(manifest.previous_good_snapshot_id)
@@ -118,6 +121,70 @@ def prune_staging(root_dir: Path, machine_id: str, *, retention_hours: int = 24,
         except OSError:
             continue
     return removed
+
+
+#: ``build_snapshot_id``: ``<UTC timestamp>-<uuid>-<12 hex of the payload hash>``.
+_SNAPSHOT_ID_RE = re.compile(
+    r"\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{12}"
+)
+#: The ``COMMITTED`` marker's temporary name, current and before CS-310.
+_MARKER_TEMP_RE = re.compile(re.escape(f".{GUARDIAN_COMMITTED_NAME}.") + r"(?:[0-9a-f]{32}\.)?tmp")
+
+
+def prune_uncommitted_snapshots(
+    root_dir: Path,
+    machine_id: str,
+    *,
+    retention_hours: int = 24,
+    now: datetime | None = None,
+) -> list[str]:
+    """Remove snapshot directories a crash left published but never committed.
+
+    Such a directory is invisible to every reader -- they all require
+    ``COMMITTED`` -- so it only takes space. It is removed only when it is
+    provably the writer's own leftover: a snapshot-id name, no ``COMMITTED``
+    entry of any kind, nothing inside but the payload, the manifest and the
+    marker's temporary file, and nothing touched for ``retention_hours``.
+    Anything else is left alone. Decided from names and times only, so a
+    manifest that cannot be read right now does not keep it.
+    """
+    if retention_hours < 0:
+        raise ValueError("Guardian staging retention must be >= 0")
+    if retention_hours == 0:
+        return []
+    root = root_dir.resolve()
+    base = root / GUARDIAN_SNAPSHOTS_DIR_NAME / machine_id
+    if not base.is_dir():
+        return []
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(hours=retention_hours)).timestamp()
+    removed: list[str] = []
+    for directory in base.iterdir():
+        try:
+            if (
+                directory.is_symlink()
+                or not directory.is_dir()
+                or not _SNAPSHOT_ID_RE.fullmatch(directory.name)
+                or os.path.lexists(directory / GUARDIAN_COMMITTED_NAME)
+                or directory.stat().st_mtime >= cutoff
+            ):
+                continue
+            children = list(directory.iterdir())
+            if not all(_is_uncommitted_leftover(child, cutoff) for child in children):
+                continue
+            directory.resolve().relative_to(base.resolve())
+            shutil.rmtree(directory)
+            removed.append(directory.name)
+        except (OSError, ValueError):
+            continue
+    return removed
+
+
+def _is_uncommitted_leftover(child: Path, cutoff: float) -> bool:
+    if child.name not in {GUARDIAN_PAYLOAD_NAME, GUARDIAN_MANIFEST_NAME} and not _MARKER_TEMP_RE.fullmatch(child.name):
+        return False
+    if child.is_symlink() or not child.is_file():
+        return False
+    return child.stat().st_mtime < cutoff
 
 
 def _prune_event_directories(base: Path, root: Path, cutoff: datetime, identifier: str) -> list[str]:

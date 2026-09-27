@@ -1168,5 +1168,131 @@ class LoginSyncSystemdTests(SandboxCase):
         self.assertNotIn(ss.SYSTEMD_TIMER, files)
 
 
+def backup_job(interval: int | None = None, at_login: bool = True, delay: int = 0) -> ScheduledJob:
+    return ScheduledJob(ss.STATE_BACKUP_MODE, interval, at_login, delay, 0)
+
+
+class StateBackupJobTests(SandboxCase):
+    """The copy of `.codex` (CS-276): its own slot, its own limits."""
+
+    def test_it_creates_a_copy_that_waits_for_codex(self) -> None:
+        self.assertEqual(
+            job_arguments(ss.STATE_BACKUP_MODE, self.config)[-3:], ["state-backup", "create", "--wait"]
+        )
+        self.assertNotIn(ss.STATE_BACKUP_MODE, JOB_MODES, "never a periodic [scheduler] mode")
+
+    def test_at_sign_in_and_or_every_n_hours_and_nothing_else(self) -> None:
+        backup_job(None, True)
+        backup_job(3600, False)
+        backup_job(6 * 3600, True, 60)
+        for bad in (
+            lambda: backup_job(None, False),
+            lambda: backup_job(60, True),
+            lambda: ScheduledJob(ss.STATE_BACKUP_MODE, 3600, True, 0, 30),
+        ):
+            with self.assertRaises(ValueError):
+                bad()
+
+    def test_a_slot_runs_only_its_own_job(self) -> None:
+        for slot, job in (
+            (ss.STATE_BACKUP_SLOT, ScheduledJob("preflight", 60, True)),
+            (ss.STATE_BACKUP_SLOT, login_job()),
+            (ss.JOB_SLOT, backup_job()),
+            (ss.LOGIN_SYNC_SLOT, backup_job()),
+        ):
+            with self.subTest(slot=slot, mode=job.mode):
+                adapter = WindowsTaskScheduler(run=FakeRun(), user_id=USER_ID, temp_dir=self.root,
+                                               protected_roots=[self.root / ".codex"], slot=slot)
+                with self.assertRaises(ValueError):
+                    adapter.install(job, command=self.command, config_path=self.config, log_dir=self.logs)
+
+    def test_windows_task_has_its_own_name_and_a_day_to_wait(self) -> None:
+        adapter = WindowsTaskScheduler(run=FakeRun(), user_id=USER_ID, temp_dir=self.root,
+                                       protected_roots=[self.root / ".codex"], slot=ss.STATE_BACKUP_SLOT)
+        self.assertNotIn(adapter.task_name, {TASK_NAME, ss.task_name_for(USER_ID, ss.LOGIN_SYNC_SLOT)})
+        root = ss.parse_task_xml(ss.render_task_xml(
+            self.definition(backup_job(6 * 3600, True, 30)), user_id=USER_ID, now=datetime(2026, 9, 25, 9, 0),
+        ))
+        self.assertEqual(ss._child_text(root.find("Settings"), "ExecutionTimeLimit"), "PT1440M")
+        trigger = list(root.find("Triggers"))[0]
+        self.assertEqual(trigger.tag, "LogonTrigger")
+        self.assertEqual(ss._child_text(trigger, "Repetition/Interval"), "PT360M")
+        periodic = ss.parse_task_xml(ss.render_task_xml(
+            self.definition(ScheduledJob("preflight", 60, True)), user_id=USER_ID, now=datetime(2026, 9, 25, 9, 0),
+        ))
+        self.assertEqual(ss._child_text(periodic.find("Settings"), "ExecutionTimeLimit"), "PT10M")
+
+    def test_launchd_never_loads_a_copy_that_runs_at_sign_in(self) -> None:
+        """CS-282: loading fires RunAtLoad, i.e. a copy at install time.
+
+        Windows' LogonTrigger never fires at registration; launchd is held to
+        the same first run -- the next sign-in -- including when the copy also
+        repeats. Only an interval-only copy is loaded now.
+        """
+        home = self.root / "home"
+        for job, loaded in (
+            (backup_job(None, True), False),
+            (backup_job(3600, True), False),
+            (backup_job(3600, False), True),
+        ):
+            with self.subTest(interval=job.interval_seconds):
+                run = FakeRun()
+                adapter = LaunchdScheduler(run=run, home=home, uid=501, protected_roots=[home / ".codex"],
+                                           launchctl="launchctl", slot=ss.STATE_BACKUP_SLOT)
+                adapter.install(job, command=self.command, config_path=self.config, log_dir=self.logs)
+                self.assertEqual(adapter.label, ss.LAUNCHD_STATE_BACKUP_LABEL)
+                self.assertEqual(any(argv[1] == "bootstrap" for argv in run.calls), loaded)
+
+    def test_systemd_units_are_its_own_and_may_run_for_a_day(self) -> None:
+        adapter = SystemdUserScheduler(run=FakeRun(), home=self.root / "home",
+                                       protected_roots=[self.root / "home" / ".codex"], systemctl="systemctl",
+                                       slot=ss.STATE_BACKUP_SLOT)
+        files = adapter.render(self.definition(backup_job(3600, True)))
+        self.assertEqual(set(files), {ss.SYSTEMD_STATE_BACKUP_SERVICE, ss.SYSTEMD_STATE_BACKUP_TIMER})
+        self.assertIn("TimeoutStartSec=1440min", files[ss.SYSTEMD_STATE_BACKUP_SERVICE].decode("utf-8"))
+
+    def test_systemd_arms_a_sign_in_copy_for_the_next_sign_in_not_for_now(self) -> None:
+        """CS-282: OnActiveSec fires after the install's restart; OnStartupSec does not."""
+        adapter = SystemdUserScheduler(run=FakeRun(), home=self.root / "home",
+                                       protected_roots=[self.root / "home" / ".codex"], systemctl="systemctl",
+                                       slot=ss.STATE_BACKUP_SLOT)
+        at_sign_in = adapter.render(self.definition(backup_job(3600, True, 30)))[ss.SYSTEMD_STATE_BACKUP_TIMER]
+        timer = at_sign_in.decode("utf-8")
+        self.assertIn("OnStartupSec=30s", timer)
+        self.assertIn("OnUnitActiveSec=3600s", timer)
+        self.assertNotIn("OnActiveSec=", timer)
+        interval_only = adapter.render(self.definition(backup_job(3600, False)))[ss.SYSTEMD_STATE_BACKUP_TIMER]
+        self.assertIn("OnActiveSec=3600s", interval_only.decode("utf-8"))
+
+    def test_the_periodic_read_only_job_keeps_its_first_run_after_install(self) -> None:
+        adapter = SystemdUserScheduler(run=FakeRun(), home=self.root / "home",
+                                       protected_roots=[self.root / "home" / ".codex"], systemctl="systemctl")
+        timer = adapter.render(self.definition(ScheduledJob("preflight", 600, True, 45)))[ss.SYSTEMD_TIMER]
+        self.assertIn("OnActiveSec=45s", timer.decode("utf-8"))
+
+    def test_a_sign_in_timer_is_enabled_but_not_started_at_install(self) -> None:
+        """CS-325: an OnStartupSec already in the past fires when the timer is started."""
+        for slot, job in (
+            (ss.LOGIN_SYNC_SLOT, login_job()),
+            (ss.STATE_BACKUP_SLOT, backup_job(3600, True, 30)),
+            (ss.STATE_BACKUP_SLOT, backup_job(None, True)),
+        ):
+            with self.subTest(slot=slot, interval=job.interval_seconds):
+                run = FakeRun()
+                adapter = SystemdUserScheduler(run=run, home=self.root / "home",
+                                               protected_roots=[self.root / "home" / ".codex"],
+                                               systemctl="systemctl", slot=slot)
+                adapter.install(job, command=self.command, config_path=self.config, log_dir=self.logs)
+                self.assertEqual([argv[2] for argv in run.calls], ["daemon-reload", "enable"])
+
+    def test_an_interval_only_copy_is_still_started_at_install(self) -> None:
+        run = FakeRun()
+        adapter = SystemdUserScheduler(run=run, home=self.root / "home",
+                                       protected_roots=[self.root / "home" / ".codex"],
+                                       systemctl="systemctl", slot=ss.STATE_BACKUP_SLOT)
+        adapter.install(backup_job(3600, False), command=self.command, config_path=self.config, log_dir=self.logs)
+        self.assertEqual([argv[2] for argv in run.calls], ["daemon-reload", "enable", "restart"])
+
+
 if __name__ == "__main__":
     unittest.main()

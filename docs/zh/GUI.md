@@ -9,9 +9,9 @@
 
 - [启动](#启动)
 - [安全](#安全)
-- 界面：[概览](#概览) · [首次运行](#首次运行) · [同步](#同步) ·
+- 界面：[主页](#主页) · [概览](#概览) · [首次运行](#首次运行) · [同步](#同步) ·
   [对话归属](#对话归属) · [会话](#会话) · [项目](#项目) ·
-  [快照守护](#快照守护) · [备份](#备份) · [恢复](#恢复) · [设置](#设置) ·
+  [快照守护](#快照守护) · [备份](#备份) · [恢复](#恢复) · [自动化](#自动化) · [设置](#设置) ·
   [关于](#关于)
 - [Windows exe](#windows-exe)
 
@@ -47,18 +47,33 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 - 耗时较长的只读扫描会在状态栏显示进度，并且可以在那里放弃等待；写入则不行。
 - 窗口执行的计划保存在 `<workspace>/plans/` 下。
 
+## 主页
+
+![主页](../screenshots/zh/01-home.png)
+
+第一个页面：本机概况，与「概览」并列而不是取代它。横幅说明 Codex 看起来是否打开（和所有
+这类提示一样，仅供参考）；每项一个卡片：最近一次同步以及 30 天内的运行次数、失败次数和
+传输的文件数，并附有通往历史的链接；聊天和项目；`.codex` 副本；写入前备份；快照守护；
+哪些自动化任务已开启，以及操作系统中的任务是否与配置一致。未完成的日志在这里也会像在
+「概览」中一样提示。
+
+除聊天数量外，其余内容都在打开页面时读取，且不会打开任何会话文件。统计聊天需要读取每个
+会话，因此这些数字来自最近一次扫描 ——「对话归属」页面或**重新统计** —— 并附有统计时间，
+保存在应用的缓存文件夹中（Windows 上为 `%LOCALAPPDATA%\CodexSync\cache`）：只有数字，
+从不包含名称、路径或标题。无法读取的部分会单独用一个卡片说明原因。
+
 ## 概览
 
-![概览](../screenshots/zh/01-overview.png)
+![概览](../screenshots/zh/02-overview.png)
 
 对这台机器的一次手动检查；它不授权任何写入。横幅说明 Codex 看起来是否已关闭。表格就是
 `doctor` 的报告：配置、状态目录、Codex 进程、检测到的全局状态结构、最近一张可还原的快照、
 会话文件、会话索引、SQLite 线程目录、一次同步被允许做什么、项目存放在哪里，以及同步清单。
-下方是同步的试运行、最近一次同步及通往其历史的链接，以及计划任务的状态和通往它设置的链接。
+下方是同步的试运行、最近一次同步及通往其历史的链接，以及计划任务的状态和通往「自动化」页面的链接。
 
 ## 首次运行
 
-![首次运行](../screenshots/zh/02-first-run.png)
+![首次运行](../screenshots/zh/03-first-run.png)
 
 用 CodexSync 内置的模板创建 `config.toml`，并保留每一条注释：
 
@@ -76,7 +91,7 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 
 ## 同步
 
-![同步](../screenshots/zh/03-sync.png)
+![同步](../screenshots/zh/04-sync.png)
 
 云端 → 本地与本地 → 云端的计划。
 
@@ -92,7 +107,7 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 
 ## 对话归属
 
-![对话归属](../screenshots/zh/04-chats.png)
+![对话归属](../screenshots/zh/05-chats.png)
 
 每个对话属于哪个项目，以及原因。这里不是聊天窗口：它显示对话的开场消息、日期、标识、
 记录数和文件夹，按项目分组。
@@ -115,7 +130,7 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 
 ## 会话
 
-![会话](../screenshots/zh/05-sessions.png)
+![会话](../screenshots/zh/06-sessions.png)
 
 同一会话的各个分支在两台机器上的比较。先选择这些会话记录在哪台机器上、本机又是哪一台，
 然后**扫描**。扫描会读取两侧，并且只写出计划文件；在 Codex 开着时做出的计划会被标记为
@@ -134,7 +149,7 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 
 ## 项目
 
-![项目](../screenshots/zh/06-projects.png)
+![项目](../screenshots/zh/07-projects.png)
 
 各个项目、它们的根目录，以及按原因统计的对话数（已固定、按路径、仅按规则），外加不属于
 任何项目的对话。选中一个项目，可以**查看它的对话**、**移动它的文件夹**或**打开文件夹**。
@@ -149,7 +164,7 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 
 ## 快照守护
 
-![快照守护](../screenshots/zh/07-guardian.png)
+![快照守护](../screenshots/zh/08-guardian.png)
 
 在 `.codex` 之外保存的、经过校验的 `.codex-global-state.json` 快照。
 
@@ -166,7 +181,7 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 
 ## 备份
 
-![备份](../screenshots/zh/08-backups.png)
+![备份](../screenshots/zh/09-backups.png)
 
 备份目录里的各份备份，以及是哪台机器做的、它们的清单能否校验通过、文件数、大小和格式。
 **还原** —— 选择一份备份和一个目标（本地 `.codex` 或云端镜像），先跑试运行，它会逐个文件
@@ -176,7 +191,7 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 
 ## 恢复
 
-![恢复](../screenshots/zh/09-recovery.png)
+![恢复](../screenshots/zh/10-recovery.png)
 
 每一次写入都会保留一份事务日志。未完成的日志会阻止一切新的改动，直到它被继续或回滚 ——
 这道阻塞正是保护本身。
@@ -184,16 +199,35 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 - **写操作日志** —— 状态、操作、开始时间、动作数量、备份快照和标识。
 - **继续**会在确认备份仍然吻合之后关闭日志；随后请重新执行被中断的命令，它会按磁盘上的
   现状重新规划。
-- **回滚到**会还原该操作创建的快照，然后关闭日志。目标永远不靠猜：一次同步可能备份了
-  两侧。
+- **回滚到**会还原该操作创建的快照，然后关闭日志。每个文件都回到它被备份时所在的一侧；
+  只有旧版还原的快照未记录这一点时，才需要选择一侧。
 
 每个动作都有自己的检查（试运行），必须先通过。
 
 见[备份与恢复](RECOVERY.md#被中断的写操作)。
 
+## 自动化
+
+![自动化](../screenshots/zh/11-automation.png)
+
+操作系统为 CodexSync 运行的所有任务都在这一页，编辑方式与「设置」相同：这些值就是
+`config.toml`，**保存并更新任务**会先保存（照常审阅），然后安装已开启的任务、删除已关闭
+的任务。
+
+- **定期安全任务** —— 守护快照、`preflight` 或同步试运行，从不写入；它的间隔、登录后
+  启动和随机延迟；已安装的任务是否与配置一致、上次和下次运行时间，以及上次退出码的含义。
+  **立即运行**会在窗口中运行该任务。
+- **登录后** —— 所有登录时启动的任务的延迟，以及一次性的设置同步。
+- **`.codex` 副本** —— 文件夹（由你选择；不会推荐）、登录后和/或每 N 小时一次、保留
+  数量、现有副本，以及**立即制作副本**；Codex 打开时它会拒绝：负责等待的是任务，而不是
+  窗口。
+
+参见[配置 → 自动化](CONFIGURATION.md#自动化)和
+[`.codex` 副本](CONFIGURATION.md#codex-副本)。
+
 ## 设置
 
-![设置](../screenshots/zh/10-settings.png)
+![设置](../screenshots/zh/12-settings.png)
 
 **设置就是 `config.toml`。** 文件会被读入一份草稿；在你保存之前，什么都不会写入。
 
@@ -202,7 +236,6 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 | 通用 | 机器名称和各个目录。每个路径都会显示它最终解析成什么；`${workspace_root}` 代表工作目录。 |
 | 同步 | 比较方式、冲突策略、方向、删除、包含哪些内容（从一棵目录树中勾选）以及排除哪些内容。 |
 | 保护 | 进程检测与守护。`safety.*` 会显示出来，但永远不可编辑。 |
-| 自动化 | 计划任务：它的作业、间隔和登录后启动；已安装的任务是否与配置一致、上次和下次运行时间，以及上次退出码的含义。 |
 | 项目路径 | `[[path_mappings]]` 规则，用表单来填写。 |
 | 服务数据 | 备份、会话镜像、同步清单、日志，以及配置历史。 |
 
@@ -222,12 +255,9 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 语言切换在页面顶部。窗口本身只记住它的大小、最后打开的页面、语言，以及上次打开的是哪个
 配置 —— 永远不记 `config.toml` 的内容。
 
-**自动化**只能执行安全作业 —— 守护快照、`preflight` 或同步试运行 —— 永远不会写入。见
-[配置 → 自动化](CONFIGURATION.md#自动化)。
-
 ## 关于
 
-![关于](../screenshots/zh/11-about.png)
+![关于](../screenshots/zh/13-about.png)
 
 这是一个什么程序、任何写入都遵守的四条规则、它有意留给你的部分，以及**这个版本** ——
 版本号、是打包好的可执行文件还是源码检出、程序文件、Python、系统和当前使用的配置文件。

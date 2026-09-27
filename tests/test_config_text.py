@@ -88,7 +88,7 @@ class SchedulerConfigTests(unittest.TestCase):
             SchedulerConfig(
                 enabled=False,
                 mode="guardian_snapshot",
-                interval_seconds=60,
+                interval_seconds=1800,
                 run_at_login=True,
                 startup_delay_seconds=0,
                 jitter_seconds=0,
@@ -128,7 +128,7 @@ class SchedulerConfigTests(unittest.TestCase):
             "jitter_seconds = 30\n"
         )
         self.assertEqual(cfg.scheduler.jitter_seconds, 30)
-        self.assertEqual(cfg.scheduler.interval_seconds, 60)
+        self.assertEqual(cfg.scheduler.interval_seconds, 1800)
 
     def test_mutating_mode_is_refused_with_a_reason(self) -> None:
         for mode in ("sync", "restore", "repair", ""):
@@ -138,7 +138,12 @@ class SchedulerConfigTests(unittest.TestCase):
 
     def test_numeric_bounds(self) -> None:
         cases = {
-            "interval_seconds = 59": "scheduler.interval_seconds must be >= 60",
+            # Five minutes is the shortest period (CS-313), and the refusal
+            # names the command that raises an older, shorter one.
+            "interval_seconds = 299": "scheduler.interval_seconds must be >= 300",
+            "interval_seconds = 60": "config upgrade",
+            # Task Scheduler refuses a longer repetition at registration (CS-277).
+            "interval_seconds = 2678401": "scheduler.interval_seconds must be <= 2678400",
             "startup_delay_seconds = -1": "scheduler.startup_delay_seconds must be >= 0",
             "jitter_seconds = -1": "scheduler.jitter_seconds must be >= 0",
         }
@@ -146,7 +151,8 @@ class SchedulerConfigTests(unittest.TestCase):
             with self.subTest(line=line):
                 with self.assertRaisesRegex(ConfigError, message):
                     _parse(f"[scheduler]\n{line}\n")
-        self.assertEqual(_parse("[scheduler]\ninterval_seconds = 60\n").scheduler.interval_seconds, 60)
+        self.assertEqual(_parse("[scheduler]\ninterval_seconds = 300\n").scheduler.interval_seconds, 300)
+        self.assertEqual(_parse("[scheduler]\ninterval_seconds = 2678400\n").scheduler.interval_seconds, 2678400)
 
     def test_wrong_types_are_refused_not_coerced(self) -> None:
         cases = {

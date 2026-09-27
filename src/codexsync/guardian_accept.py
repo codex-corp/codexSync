@@ -13,9 +13,10 @@ were gone, and every snapshot after that went to quarantine as
 
 This module plans the way out, and the plan is what a person decides on:
 
-* **Only a shrink can be accepted.** A state that fails byte, JSON, schema or
-  reference validation is refused whatever anyone confirms; acceptance
-  overrides a *judgement* about counts, never an integrity check.
+* **Only a shrink or a schema change can be accepted.** A state that fails
+  byte, JSON, schema or reference validation is refused whatever anyone
+  confirms; acceptance overrides a *judgement* about counts, or the watcher's
+  inability to compare two schemas it both knows, never an integrity check.
 * **The explanation is counted, not listed.** Guardian's rule is that project
   names, roots and thread ids never leave core, and this keeps it: projects
   whose id vanished while a project with the same roots appeared under a new id
@@ -46,7 +47,7 @@ from typing import Any
 
 from .guardian_models import GuardianManifest, ValidationReport, ValidationStatus
 from .guardian_schema import binding_project_id, detect_state_schema, project_root_paths
-from .guardian_shrink import BINDING_COUNT_DROP, PROJECT_COUNT_DROP
+from .guardian_shrink import BASELINE_SCHEMA_MISMATCH, BINDING_COUNT_DROP, PROJECT_COUNT_DROP, UNKNOWN_SCHEMA
 
 
 GUARDIAN_ACCEPT_PLAN_VERSION = 1
@@ -54,6 +55,17 @@ GUARDIAN_ACCEPT_PLAN_VERSION = 1
 #: Recorded in the accepted snapshot's manifest next to the shrink codes.
 SHRINK_ACCEPTED = "SHRINK_ACCEPTED"
 ACCEPTABLE_CODES = frozenset({PROJECT_COUNT_DROP, BINDING_COUNT_DROP})
+#: The state is in another schema than the baseline -- or the baseline predates
+#: recording one -- and passes every check under its own. The watcher can never
+#: compare the two, so without a person's decision ``latest-good`` would stay on
+#: the old schema for good (CS-312).
+BASELINE_SCHEMA_CHANGED = "BASELINE_SCHEMA_CHANGED"
+#: Recorded in the manifest of a snapshot accepted over a schema change.
+SCHEMA_CHANGE_ACCEPTED = "SCHEMA_CHANGE_ACCEPTED"
+#: Markers of a person's decision; retention keeps such a snapshot and its baseline.
+ACCEPTED_MARKERS = frozenset({SHRINK_ACCEPTED, SCHEMA_CHANGE_ACCEPTED})
+#: What the shrink assessment appends when it cannot compare schemas.
+_SCHEMA_COMPARISON_CODES = frozenset({BASELINE_SCHEMA_MISMATCH, UNKNOWN_SCHEMA})
 
 #: There is no ``latest-good`` yet, so nothing is being compared against and
 #: the next snapshot commits without anyone's decision.
@@ -145,6 +157,12 @@ def build_guardian_accept_plan(
         codes.append(NO_BASELINE)
     elif candidate.status in {ValidationStatus.PASS, ValidationStatus.PASS_WITH_WARNING}:
         codes.append(NOTHING_TO_ACCEPT)
+    elif is_schema_change(candidate, baseline):
+        shrink_codes = (BASELINE_SCHEMA_CHANGED,)
+        if baseline_payload is None:
+            codes.append(BASELINE_UNRESOLVED)
+        else:
+            explanation, digest = _explain(baseline_payload, candidate_payload)
     elif candidate.status is not ValidationStatus.SUSPICIOUS:
         codes.append(STATE_REJECTED)
     else:
@@ -164,6 +182,10 @@ def build_guardian_accept_plan(
         "baseline_snapshot_id": baseline.snapshot_id if baseline is not None else None,
         "baseline_sha256": baseline.sha256 if baseline is not None else None,
         "schema_id": candidate.schema_id if candidate is not None else None,
+        **(
+            {"baseline_schema_id": baseline.schema_id if baseline is not None else None}
+            if BASELINE_SCHEMA_CHANGED in shrink_codes else {}
+        ),
         "projects_now": candidate.project_count if candidate is not None else None,
         "bindings_now": candidate.binding_count if candidate is not None else None,
         "shrink_codes": list(shrink_codes),
@@ -189,12 +211,47 @@ def build_guardian_accept_plan(
     )
 
 
+def is_schema_change(candidate: ValidationReport, baseline: GuardianManifest | None) -> bool:
+    """Whether ``candidate`` was held back only because its schema differs from the baseline's.
+
+    The shrink assessment turns a *passing* report into ``INDETERMINATE`` by
+    appending exactly one schema-comparison code, and only after it has proved
+    the baseline verified. A report that failed on its own never gets that far,
+    and an unrecognised state has no ``schema_id`` -- so a known schema, counts,
+    that last code and a baseline in another (or no recorded) schema together
+    mean "fully valid, merely not comparable". Anything else is not this case.
+    """
+    return (
+        baseline is not None
+        and candidate.status is ValidationStatus.INDETERMINATE
+        and bool(candidate.schema_id)
+        and candidate.project_count is not None
+        and candidate.binding_count is not None
+        and bool(candidate.codes)
+        and candidate.codes[-1] in _SCHEMA_COMPARISON_CODES
+        and baseline.validation_status in {ValidationStatus.PASS, ValidationStatus.PASS_WITH_WARNING}
+        and baseline.schema_id != candidate.schema_id
+    )
+
+
 def accepted_validation(candidate: ValidationReport) -> ValidationReport:
     """The report an accepted state is committed under.
 
     ``PASS_WITH_WARNING`` because the state did pass every integrity check; the
-    shrink codes stay on it so the manifest still says what was overridden.
+    shrink codes stay on it so the manifest still says what was overridden. A
+    schema change drops the comparison code the assessment appended -- it
+    names the comparison, not the state -- and says what was decided instead.
     """
+    if candidate.status is ValidationStatus.INDETERMINATE:
+        if not candidate.codes or candidate.codes[-1] not in _SCHEMA_COMPARISON_CODES:
+            raise ValueError("Only a schema change or a shrink can be accepted")
+        return ValidationReport(
+            ValidationStatus.PASS_WITH_WARNING,
+            tuple(candidate.codes[:-1]) + (SCHEMA_CHANGE_ACCEPTED,),
+            project_count=candidate.project_count,
+            binding_count=candidate.binding_count,
+            schema_id=candidate.schema_id,
+        )
     return ValidationReport(
         ValidationStatus.PASS_WITH_WARNING,
         tuple(candidate.codes) + (SHRINK_ACCEPTED,),

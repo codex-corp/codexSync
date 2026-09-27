@@ -70,6 +70,7 @@ class SyncEngine:
         after_backup: Callable[[], None] | None = None,
         after_success: Callable[[], None] | None = None,
         now: Callable[[], float] = time.time,
+        before_stage_check: Callable[[], None] | None = None,
     ) -> None:
         self._backup_manager = backup_manager
         self._temp_dir = temp_dir
@@ -80,6 +81,10 @@ class SyncEngine:
         self._after_backup = after_backup
         self._after_success = after_success
         self._now = now
+        #: Called once before the first staging file is written. Staging puts
+        #: a sibling beside each destination -- inside `.codex` for a copy to
+        #: the local side -- and the plan may be minutes old after hashing.
+        self._before_stage_check = before_stage_check
 
     def execute(self, plan: SyncPlan, dry_run: bool = True) -> None:
         actions = [*plan.to_local, *plan.to_cloud]
@@ -96,6 +101,8 @@ class SyncEngine:
             raise FailSafeError("backup_before_overwrite=false is not permitted for apply")
 
         self._cleanup_orphaned_temp_files()
+        if actions and self._before_stage_check is not None:
+            self._before_stage_check()
         token = uuid.uuid4().hex[:8]
         swept: set[Path] = set()
         staged: list[tuple[CopyAction, Path]] = []
@@ -122,15 +129,23 @@ class SyncEngine:
                 staged.append((action, staged_path))
 
             # A complete backup set exists before any destination mutation.
+            # Each entry names its side, so a rollback puts it back into the
+            # root it came from (CS-293).
+            to_local = {id(action) for action in plan.to_local}
             for action, _ in staged:
                 if action.dst.exists():
-                    backup_path = self._backup_manager.backup_file(action.dst, action.relative_path)
+                    backup_path = self._backup_manager.backup_file(
+                        action.dst, action.relative_path,
+                        side="local" if id(action) in to_local else "cloud",
+                    )
                     if backup_path is None:
                         raise FailSafeError("Failed to create required backup before mutation")
             for deletion in deletions:
                 # A file that vanished between the plan and now is not a file
                 # this run may delete: the plan described something else.
-                backup_path = self._backup_manager.backup_file(deletion.path, deletion.relative_path)
+                backup_path = self._backup_manager.backup_file(
+                    deletion.path, deletion.relative_path, side=deletion.side
+                )
                 if backup_path is None:
                     raise FailSafeError(
                         f"Cannot delete {deletion.relative_path}: it could not be backed up"
@@ -269,7 +284,10 @@ class SyncEngine:
             return
         removed = 0
         for path in self._temp_dir.rglob("*.tmp"):
-            if not path.is_file():
+            # Age-limited like the directories below: a journal of another
+            # command family is written as `<id>.tmp` here and replaced a
+            # moment later, and removing it mid-write fails that command.
+            if not path.is_file() or not _older_than(path, _ORPHAN_STAGE_AGE_SECONDS, self._now()):
                 continue
             path.unlink(missing_ok=True)
             removed += 1

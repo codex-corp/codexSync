@@ -34,7 +34,10 @@ def resolve_or_restore_latest_good(root_dir: Path, machine_id: str) -> GuardianS
     root = root_dir.resolve()
     machine = require_guardian_machine_id(machine_id)
     pointer = _read_pointer(_pointer_path(root, machine))
-    if pointer is not None:
+    # A pointer file names its machine; one that names another machine (a copy
+    # dropped into the wrong file) must not hand that machine's snapshot out as
+    # this one's baseline. It is treated as damaged and rebuilt.
+    if pointer is not None and pointer.machine_id == machine:
         snapshot = _snapshot_from_pointer(root, pointer)
         if snapshot is not None:
             return snapshot
@@ -104,10 +107,14 @@ def _read_pointer(path: Path) -> LatestGoodPointer | None:
         )
         if (
             pointer.manifest_version != GUARDIAN_MANIFEST_VERSION
+            # Type first: a non-string machine id made the normaliser raise
+            # AttributeError, which escaped every caller (CS-325).
+            or not isinstance(pointer.machine_id, str)
             or require_guardian_machine_id(pointer.machine_id) != pointer.machine_id
             or not isinstance(pointer.snapshot_id, str)
             or "/" in pointer.snapshot_id
             or "\\" in pointer.snapshot_id
+            or isinstance(pointer.generation, bool)
             or not isinstance(pointer.generation, int)
             or pointer.generation < 1
             or not isinstance(pointer.sha256, str)
@@ -115,7 +122,22 @@ def _read_pointer(path: Path) -> LatestGoodPointer | None:
             or not isinstance(pointer.updated_at_utc, str)
         ):
             return None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return pointer
+
+
+def read_latest_good_pointer(root_dir: Path, machine_id: str) -> LatestGoodPointer | None:
+    """This machine's pointer as written, whether or not it resolves. Reads only.
+
+    Numbering a new snapshot must stay above the generation it names even when
+    that snapshot is unreadable right now (CS-297), and grouping quarantine
+    events by baseline needs its id without hashing a payload per event.
+    """
+    root = root_dir.resolve()
+    machine = require_guardian_machine_id(machine_id)
+    pointer = _read_pointer(_pointer_path(root, machine))
+    if pointer is None or pointer.machine_id != machine:
         return None
     return pointer
 

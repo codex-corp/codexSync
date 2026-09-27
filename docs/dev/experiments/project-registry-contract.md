@@ -19,19 +19,18 @@ From `.codex-global-state.json` on the machine this was examined on:
 
 From a copy of `state_5.sqlite` (the original was never opened for writing):
 
-- a `projects` table with 48 rows -- four NetRuleRouter and four CommentRake,
-  most names repeated across id generations `01a04db6…`, `01a055eb…`,
-  `01a055f1…`, `01a056b1…`, `01a0933d…`, which look like traces of earlier
+- a `projects` table with 48 rows -- two names four times each, most names
+  repeated across five id generations, which look like traces of earlier
   manual recoveries (`.codex` also holds `.pre-recovery-*` and
   `.pre-historic-projects-*` copies);
 - a `project_roots` table;
 - `threads.project_id REFERENCES projects`, NULL in all 269 rows.
 
-From a screenshot of the Codex sidebar (2026-09-13): `LabTakt` and
-`project-chloya` are pinned and `project-reconstellate` is first, which matches
-the **JSON** ids exactly (`pinned-project-ids`, `selected-project`,
-`unified-sidebar-project-order-v1`). In SQLite project-reconstellate is also at
-position 0, but under a different id. So ordering and pinning follow the JSON.
+From a screenshot of the Codex sidebar (2026-09-13): the two pinned projects
+and the one shown first match the **JSON** ids exactly (`pinned-project-ids`,
+`selected-project`, `unified-sidebar-project-order-v1`). In SQLite the first
+project is also at position 0, but under a different id. So ordering and
+pinning follow the JSON.
 The screenshot was cut off before the end of the list, so the *membership* of
 the list and the *root path* of each project are still open.
 
@@ -41,7 +40,7 @@ Copy a `.codex` aside first. Record the Codex version at every step.
 
 1. **How many projects does the panel show?** Count the entries in the
    Projects section with the JSON holding 18 and SQLite holding 48. 18 with
-   the duplicate NetRuleRouter and CommentRake means the list comes from the
+   the two duplicated projects each shown twice means the list comes from the
    JSON; 48, or any other number, means it comes from the app-server registry
    and the JSON is a cache.
 

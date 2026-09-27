@@ -31,15 +31,24 @@ and run `automation apply` (see [Automation](CONFIGURATION.md#automation)).
   snapshot. `watch` polls every 3 s, waits 2 s after a change, and rescans every
   60 s in case a change was missed.
 - **Validation.** Bytes, JSON and referential integrity are checked: NUL bytes, a
-  BOM, duplicate keys, bindings that point to a project that does not exist.
+  BOM other than one UTF-8 mark at the very start, duplicate keys, bindings that
+  point to a project that does not exist.
 - **The schema is recognised, not assumed.** Each known shape of the file has its
   own adapter; a state no adapter recognises is not trusted.
 - **Suspicious shrink.** A state that lost many projects or bindings compared with
   the last good snapshot goes to **quarantine** instead of replacing it
-  (`shrink_min_count`, `shrink_ratio`).
+  (`shrink_min_count`, `shrink_ratio`). While Codex keeps rewriting such a state,
+  quarantine keeps two events per drop — the first and the newest, which counts
+  the rewrites in between — rather than a copy of every rewrite.
 - **Order and visibility.** Snapshots are ordered by a monotonic generation, not
-  by the clock. A snapshot is visible only once it is `COMMITTED`, and nothing
-  suspicious can ever become `latest-good`.
+  by the clock; a new one is numbered past every snapshot the store holds, and a
+  snapshot file that cannot be read at that moment stops the commit until it can.
+  A snapshot is visible only once it is `COMMITTED`, and nothing suspicious can
+  ever become `latest-good`. A directory a crash left without `COMMITTED` is
+  removed after `staging_retention_hours`.
+- **A store error is not the end of `watch`.** A snapshot held by another program
+  or a full disk costs that one attempt; `watch` logs it, waits longer each time,
+  and tries again.
 
 An honest limit: a scheduled `snapshot --once` does not guarantee the snapshot is
 fresh at the moment of a BSOD. It guarantees that the snapshot that exists is
@@ -61,8 +70,12 @@ codexsync -c config.toml guardian restore --snapshot <snapshot-id> --confirm <pl
 ```
 
 Refused: a snapshot that no longer passes validation, one that belongs to another
-machine, one in another schema than the file Codex writes today, and a restore
-when the live file is missing.
+machine, one in another schema than the file Codex writes today, a live file whose
+project state is in a shape codexSync does not recognise yet (`LIVE_SCHEMA_UNKNOWN`
+— a newer Codex, not damage), and a restore when the live file is missing.
+
+Restoring an older snapshot does not rewind Guardian: the next snapshot of the
+restored file is a new generation and becomes `latest-good`.
 
 ## Accepting a new baseline
 
@@ -80,11 +93,15 @@ codexsync -c config.toml guardian accept
 codexsync -c config.toml guardian accept --confirm <plan-id>
 ```
 
-- Only a shrink can be accepted, never a state that fails validation.
+- Only a shrink can be accepted, never a state that fails validation — or a
+  **schema change**: when the state is in another known schema than the baseline
+  (a new Codex build, a baseline older than schema tracking), the watcher cannot
+  compare the two and holds every state back. Such a state can be accepted when it
+  passes every check under its own schema (`BASELINE_SCHEMA_CHANGED`).
 - The plan id pins the drop, not the file's bytes, so it can be confirmed while
   Codex keeps rewriting the file.
-- The snapshot is marked `SHRINK_ACCEPTED`, and retention keeps both it and the
-  baseline it overrode ([D-014](../dev/DECISIONS.md)).
+- The snapshot is marked `SHRINK_ACCEPTED` (or `SCHEMA_CHANGE_ACCEPTED`), and
+  retention keeps both it and the baseline it overrode ([D-014](../dev/DECISIONS.md)).
 
 ## Settings
 

@@ -184,8 +184,9 @@ enabled = false
 # Safe job only: guardian_snapshot|preflight|sync_dry_run.
 # Mutating operations are deliberately not valid scheduler modes.
 mode = "guardian_snapshot"
-# Repeat interval; must be at least 60 seconds.
-interval_seconds = 60
+# Repeat interval in seconds: from 300 (5 minutes) to 31 days (2678400), the
+# longest the OS scheduler repeats a task at. Default: 1800 (30 minutes).
+interval_seconds = 1800
 # Run the user-level job after the user signs in / user session starts.
 run_at_login = true
 # Optional delay after sign-in or session start; avoids competing with startup.
@@ -223,3 +224,22 @@ max_file_size_mb = 10
 strict_handoff_required = true
 cloud_readiness_is_user_responsibility = true
 cloud_capacity_is_user_responsibility = true
+
+[state_backup]
+# Copies of the valuable part of the Codex state directory: sessions, the
+# archive, the global state, the SQLite catalogues, config.toml, rules, skills
+# and memories. Secrets (auth.json, cap_sid, .sandbox-secrets) are never
+# copied, nor are caches, logs and temporary files.
+# A copy is taken only while Codex is closed; a scheduled copy waits for Codex
+# to close. Each copy is one zip file, verified before it replaces anything.
+# Folder for the copies. Empty: no copies are taken and the task stays off.
+# It must be outside the Codex state directory, backup_dir, temp_dir, the
+# cloud mirror, guardian.root_dir and semantic.root_dir.
+root_dir = ""
+# Take a copy after signing in (waits for Codex to close if it is open).
+at_login = false
+# Take a copy every N hours, at most 744 (31 days); 0 = off.
+interval_hours = 0
+# Copies of this machine to keep; older ones are removed after a new copy
+# has been verified.
+keep = 5

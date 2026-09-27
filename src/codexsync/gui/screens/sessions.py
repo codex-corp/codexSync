@@ -17,7 +17,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QTreeWidget, QTreeWidgetItem
 
 from ..controller import Failure, Outcome
-from ..widgets import Banner, Cell, button, card, command, fill_table, label, machine_combo, row, selected_data, set_tone, table
+from ..widgets import Banner, Cell, button, card, command, fill_table, human_size, label, machine_combo, row, selected_data, set_tone, table
 from .base import Model, Screen
 
 CATEGORIES = {
@@ -30,6 +30,7 @@ CATEGORIES = {
     "BLOCKED_TARGET_COLLISION": "decide",
     "BLOCKED_UNPROVEN_LAYOUT": "unsupported",
     "BLOCKED_UNSUPPORTED_BACKEND": "unsupported",
+    "BLOCKED_INVALID_BRANCH": "unsupported",
 }
 CATEGORY_ORDER = ("decide", "transfer", "unsupported", "out_of_scope", "same")
 CATEGORY_TONES = {
@@ -59,6 +60,10 @@ class SessionsModel(Model):
         self.scope_busy = False
         #: Whether the stored set has been read back into this model yet.
         self.scope_loaded = False
+        #: The (source, target) pair the set above was read for. A set belongs
+        #: to one pair: shown under another, it is a set no scan would use,
+        #: and taking it would store one pair's choice under the other.
+        self.scope_pair: tuple[str, str] | None = None
         #: The chat directory the tree of projects is drawn from.
         self.directory: Outcome | None = None
         self.directory_busy = False
@@ -69,6 +74,7 @@ class SessionsModel(Model):
         self.scope = None
         self.directory = None
         self.scope_loaded = False
+        self.scope_pair = None
 
 
 class SessionsScreen(Screen):
@@ -84,6 +90,9 @@ class SessionsScreen(Screen):
             m.source = next((name for name in machines if name != m.target), "")
         self.source = machine_combo(machines, m.source, placeholder=self.t("machines.source"))
         self.target = machine_combo(machines, m.target, placeholder=self.t("machines.target"))
+        for combo in (self.source, self.target):
+            combo.activated.connect(self._pair_changed)
+            combo.lineEdit().editingFinished.connect(self._pair_changed)
         self.scan_button = button(self.t("sessions.scan"), primary=True)
         self.scan_button.clicked.connect(self.scan)
         self.body.addLayout(row(
@@ -270,17 +279,31 @@ class SessionsScreen(Screen):
         """
         model = self.model
         model.scope_loaded = True
-        source = self.source.currentText().strip()
-        target = self.target.currentText().strip()
-        if not source or not target:
-            return
-        outcome = self.host.controller.working_set(
-            source_machine=source, target_machine=target,
-        )
-        if outcome.ok and outcome.value is not None:
-            model.scope_projects = tuple(outcome.value.projects)
-            model.scope_chats = tuple(outcome.value.chats)
+        source, target = self._pair()
+        model.scope_pair = (source, target)
+        model.scope = None
+        model.scope_projects = ()
+        model.scope_chats = ()
+        if source and target:
+            outcome = self.host.controller.working_set(
+                source_machine=source, target_machine=target,
+            )
+            if outcome.ok and outcome.value is not None:
+                model.scope_projects = tuple(outcome.value.projects)
+                model.scope_chats = tuple(outcome.value.chats)
+            elif not outcome.ok:
+                model.scope = outcome
         self.render()
+
+    def _pair(self) -> tuple[str, str]:
+        return self.source.currentText().strip(), self.target.currentText().strip()
+
+    def _pair_changed(self, *_: object) -> None:
+        """Another pair of machines was chosen: show the set stored for it."""
+        if self.model.scope_busy or self.model.scope_pair == self._pair():
+            return
+        self.model.source, self.model.target = self._pair()
+        self.load_working_set()
 
     def load_projects(self) -> None:
         """Read the chats once, to draw the tree of projects."""
@@ -308,15 +331,27 @@ class SessionsScreen(Screen):
                 chosen.append(child.data(0, Qt.UserRole))
         self.model.scope_projects = tuple(chosen)
         self.model.scope = None
+        # The tree already shows this choice; redrawing it would only lose
+        # the scroll position.
+        self._scope_drawn = self._scope_key()
         self._render_scope()
 
     def take_working_set(self) -> None:
-        """Expand the chosen projects and remember the set for this pair."""
+        """Expand the chosen projects and remember the set for this pair.
+
+        A write, so it runs as one: nobody may stop waiting for it, because a
+        store that is merely no longer watched has not stopped.
+        """
         model = self.model
         if model.scope_busy:
             return
-        model.source = self.source.currentText().strip()
-        model.target = self.target.currentText().strip()
+        if model.scope_pair != self._pair():
+            # The ticks on screen were chosen for another pair; show the set
+            # this pair has before anything is stored under it.
+            model.source, model.target = self._pair()
+            self.load_working_set()
+            return
+        model.source, model.target = self._pair()
         model.scope_busy = True
         self.render()
         controller = self.host.controller
@@ -327,7 +362,8 @@ class SessionsScreen(Screen):
             model.scope_busy = False
             model.scope = outcome
 
-        self.read(
+        self.host.run(
+            self.page,
             lambda progress=None: controller.save_working_set(
                 projects=projects, chats=chats,
                 source_machine=source, target_machine=target, progress=progress,
@@ -336,22 +372,62 @@ class SessionsScreen(Screen):
         )
 
     def clear_working_set(self) -> None:
-        """Carry everything again."""
+        """Carry everything again.
+
+        Storing an empty set reads no chat, but it is still a write and runs
+        off the UI thread like one; its outcome is kept, so a store that failed
+        is said rather than hidden behind "carry everything".
+        """
         model = self.model
-        model.scope_projects = ()
-        model.scope_chats = ()
+        if model.scope_busy:
+            return
+        model.source, model.target = self._pair()
+        if model.scope_pair != (model.source, model.target):
+            # What is ticked belongs to another pair; clearing is for the pair
+            # chosen now, so a failure must leave *its* set on screen.
+            self.load_working_set()
         model.scope = None
-        model.source = self.source.currentText().strip()
-        model.target = self.target.currentText().strip()
-        self.host.controller.save_working_set(
-            projects=(), chats=(),
-            source_machine=model.source, target_machine=model.target,
-        )
+        model.scope_busy = True
         self.render()
+        controller = self.host.controller
+        source, target = model.source, model.target
+
+        def apply(model: SessionsModel, outcome: Outcome) -> None:
+            model.scope_busy = False
+            if outcome.ok:
+                # Stored: the page says "carry everything".
+                model.scope_projects = ()
+                model.scope_chats = ()
+                model.scope = None
+            else:
+                # Not stored: the set that is still in force stays on screen,
+                # with the reason, instead of a "carry everything" that is not so.
+                model.scope = outcome
+
+        self.run(
+            lambda: controller.save_working_set(
+                projects=(), chats=(), source_machine=source, target_machine=target,
+            ),
+            apply,
+        )
+
+    def _scope_key(self) -> tuple:
+        """What the scope tree is drawn from; it is redrawn only when this changes."""
+        return (self.model.directory, self.model.scope_projects)
 
     def _fill_scope_tree(self) -> None:
+        # A scan redraws the page on every progress report; rebuilding a tree
+        # of every project each time is what made the window stutter.
+        key = self._scope_key()
+        drawn = getattr(self, "_scope_drawn", None)
+        # The directory by identity: comparing two scans by value would walk
+        # every chat on every redraw, which is the cost this avoids.
+        if drawn is not None and drawn[0] is key[0] and drawn[1] == key[1]:
+            return
+        self._scope_drawn = key
         outcome = self.model.directory
         if outcome is None or not outcome.ok:
+            self.scope_tree.clear()
             return
         directory = outcome.value
         counts: dict[str, int] = {}
@@ -379,14 +455,14 @@ class SessionsScreen(Screen):
     def _render_scope(self) -> None:
         model = self.model
         self.scope_take.setEnabled(bool(model.scope_projects or model.scope_chats) and not model.scope_busy)
-        self.scope_clear.setEnabled(bool(model.scope_projects or model.scope_chats))
+        self.scope_clear.setEnabled(bool(model.scope_projects or model.scope_chats) and not model.scope_busy)
         if model.scope_busy:
             text = self.t("sessions.scope.counting")
         elif model.scope is not None and model.scope.ok and model.scope.value is not None:
             scope = model.scope.value
             text = self.join([
                 self.p("sessions.scope.count", scope.chat_count),
-                self.t("sessions.scope.size", size=_size(scope.total_bytes)),
+                self.t("sessions.scope.size", size=human_size(scope.total_bytes)),
                 self.t(
                     "sessions.scope.saved",
                     source=model.source or "?", target=model.target or "?",
@@ -411,8 +487,10 @@ class SessionsScreen(Screen):
         model = self.model
         if model.busy or model.action_busy:
             return
-        model.source = self.source.currentText().strip()
-        model.target = self.target.currentText().strip()
+        model.source, model.target = self._pair()
+        if model.scope_pair != (model.source, model.target) and not model.scope_busy:
+            # The scan uses the set stored for this pair; the page shows that one.
+            self.load_working_set()
         # The scope tree is drawn from the chat directory. Asking for a scan is
         # also asking for the tree, so it loads here rather than on arrival.
         if model.directory is None:
@@ -679,9 +757,3 @@ def _format_migrations(plan) -> tuple[int, int]:
     ]
     held = sum(1 for item in rewrites if "OLDER_FORMAT_HAS_LATER_RECORDS" in item.codes)
     return len(rewrites) - held, held
-
-
-def _size(size: int) -> str:
-    from .guardian import _size as size_text
-
-    return size_text(size)

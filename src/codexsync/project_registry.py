@@ -10,7 +10,7 @@ What *is* established, from a screenshot of the Codex sidebar taken on
 2026-09-13: pinning, the selected project and the order all follow the **JSON**
 ids -- `pinned-project-ids`, `selected-project` and
 `electron-persisted-atom-state.unified-sidebar-project-order-v1` (16 entries,
-including both duplicate copies of NetRuleRouter and CommentRake) match what
+including both copies of each of the two projects listed twice) match what
 the window shows. What is *not* established is where the list's membership and
 each project's root path come from. Those are exactly what a delete, a merge or
 a repointing would change.

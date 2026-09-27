@@ -3,14 +3,20 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import time
 from uuid import uuid4
 import zipfile
 
+from .exceptions import FailSafeError
 from .guardian_models import normalize_machine_id
+from .mutation_journal import JournalStore
+
+LOG = logging.getLogger(__name__)
 
 
 class BackupManager:
@@ -21,12 +27,19 @@ class BackupManager:
         retention_days: int = 30,
         max_backups: int = 0,
         compression: str = "none",
+        journal_root: Path | None = None,
     ) -> None:
         self._backup_root = backup_root
+        #: Where this machine's mutation journals live (`paths.temp_dir`): a
+        #: snapshot an unfinished journal names is never pruned (CS-294).
+        self._journal_root = journal_root
         self._retention_days = retention_days
         self._max_backups = max_backups
         self._compression = compression
         safe_machine = normalize_machine_id(machine_id) or "unknown-machine"
+        self._own_snapshot = re.compile(
+            rf"^{re.escape(safe_machine)}-\d{{8}}T\d{{6}}Z-[0-9a-f]{{12}}(\.zip)?$"
+        )
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         operation_suffix = uuid4().hex[:12]
         self._snapshot_path = (
@@ -47,23 +60,32 @@ class BackupManager:
         """
         return self._snapshot_path.name
 
-    def backup_file(self, file_path: Path, relative_path: str) -> Path | None:
+    def backup_file(self, file_path: Path, relative_path: str, *, side: str | None = None) -> Path | None:
         """
         Backups existing destination file before overwrite.
         Returns backup file path.
+
+        ``side`` (``local`` or ``cloud``) is recorded in the manifest entry.
+        One sync backs up files of both sides into one snapshot under their
+        relative paths, and without it a rollback could not tell which root a
+        file came from -- it wrote the cloud side's backups into ``.codex``
+        (CS-293).
         """
         if not file_path.exists() or not file_path.is_file():
             return None
 
         if self._compression == "zip":
-            return self._backup_file_zip(file_path, relative_path)
-
-        backup_path = self._snapshot_path / relative_path
-        backup_path.parent.mkdir(parents=True, exist_ok=True)
-        backup_path = self._deduplicate_path(backup_path)
-        shutil.copy2(file_path, backup_path)
-        self._record_verified(file_path, relative_path, backup_path)
-        return backup_path
+            result = self._backup_file_zip(file_path, relative_path)
+        else:
+            backup_path = self._snapshot_path / relative_path
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            backup_path = self._deduplicate_path(backup_path)
+            shutil.copy2(file_path, backup_path)
+            self._record_verified(file_path, relative_path, backup_path)
+            result = backup_path
+        if side is not None:
+            self._manifest_entries[-1]["side"] = side
+        return result
 
     def finalize(self) -> Path | None:
         if not self._manifest_entries:
@@ -86,12 +108,24 @@ class BackupManager:
         return manifest_path
 
     def prune(self) -> None:
+        """Remove this machine's snapshots past retention -- and nothing else.
+
+        `backup_dir` is often in the shared cloud folder and has neighbours, so
+        only a name this manager writes, for this machine, is a candidate
+        (CS-290, CS-294): another machine's snapshot may be the one its own
+        interrupted journal needs, and a folder that merely sits here is not a
+        snapshot at all. A snapshot an unfinished journal of this machine names
+        is kept whatever its age, and when the journals cannot be read nothing
+        is pruned -- a late prune costs disk space, an early one a rollback.
+        """
         if not self._backup_root.exists():
             return
+        protected = self._protected_snapshots()
+        if protected is None:
+            LOG.warning("backup prune skipped: the mutation journals could not be read")
+            return
 
-        snapshots = [path for path in self._backup_root.iterdir() if path.is_dir() or _is_snapshot_zip(path)]
-        snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
+        snapshots = self._own_snapshots(protected)
         now = time.time()
         if self._retention_days > 0:
             cutoff = now - (self._retention_days * 24 * 60 * 60)
@@ -100,10 +134,30 @@ class BackupManager:
                     _remove_snapshot(path)
 
         if self._max_backups > 0:
-            snapshots = [path for path in self._backup_root.iterdir() if path.is_dir() or _is_snapshot_zip(path)]
-            snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            snapshots = self._own_snapshots(protected)
             for stale in snapshots[self._max_backups :]:
                 _remove_snapshot(stale)
+
+    def _own_snapshots(self, protected: frozenset[str]) -> list[Path]:
+        snapshots = [
+            path
+            for path in self._backup_root.iterdir()
+            if self._own_snapshot.match(path.name)
+            and path.name not in protected
+            and (path.is_dir() if path.suffix.lower() != ".zip" else _is_snapshot_zip(path))
+        ]
+        snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return snapshots
+
+    def _protected_snapshots(self) -> frozenset[str] | None:
+        """Snapshot names an unfinished journal needs; ``None`` if unknowable."""
+        if self._journal_root is None:
+            return frozenset()
+        try:
+            journals = JournalStore(self._journal_root).non_terminal()
+        except (FailSafeError, OSError):
+            return None
+        return frozenset(item.backup_snapshot for item in journals if item.backup_snapshot)
 
     def _backup_file_zip(self, file_path: Path, relative_path: str) -> Path:
         snapshot_zip = self._snapshot_path

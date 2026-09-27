@@ -10,11 +10,12 @@ English, Russian and Chinese, with a light and a dark theme.
 
 - [Starting it](#starting-it)
 - [Safety](#safety)
-- Screens: [Overview](#overview) · [First run](#first-run) ·
+- Screens: [Home](#home) · [Overview](#overview) · [First run](#first-run) ·
   [Synchronisation](#synchronisation) · [Chat bindings](#chat-bindings) ·
   [Sessions](#sessions) · [Projects](#projects) ·
   [Snapshot guardian](#snapshot-guardian) · [Backups](#backups) ·
-  [Recovery](#recovery) · [Settings](#settings) · [About](#about)
+  [Recovery](#recovery) · [Automation](#automation) · [Settings](#settings) ·
+  [About](#about)
 - [Windows exe](#windows-exe)
 
 The screenshots show invented demo data. They are rendered offscreen by
@@ -55,9 +56,29 @@ Nothing about the safety rules changes in the window.
   abandoned there; a write cannot be.
 - Plans the window applies are saved under `<workspace>/plans/`.
 
+## Home
+
+![Home](../screenshots/en/01-home.png)
+
+The first page: this machine at a glance, beside *Overview* rather than instead
+of it. A banner says whether Codex looks open (only an indication, like every
+such line), and one tile each shows the last synchronisation with the runs,
+failures and files moved in the last 30 days and a link to the history; chats
+and projects; copies of `.codex`; backups made before writes; the snapshot
+guardian; and which automation tasks are on and whether the operating system
+has them as configured. An unfinished journal is announced here as on
+*Overview*.
+
+Everything but the chat counts is read when the page opens, and none of it
+opens a session file. Counting chats reads every session, so those numbers come
+from the last scan — the *Chat bindings* page or **Recount** — are shown with
+the time they were taken, and are kept in the application's cache folder
+(`%LOCALAPPDATA%\CodexSync\cache` on Windows): counts only, never a name, a
+path or a title. A part that cannot be read is one tile saying why.
+
 ## Overview
 
-![Overview](../screenshots/en/01-overview.png)
+![Overview](../screenshots/en/02-overview.png)
 
 A manual check of this machine; it authorises no write. The banner says whether
 Codex looks closed. The table is the `doctor` report: configuration, state
@@ -65,11 +86,11 @@ directories, the Codex process, the detected global-state schema, the latest
 restorable snapshot, session files, the session index, the SQLite thread
 catalogue, what a sync is allowed to do, where projects are stored, and the sync
 manifest. Below it: a dry run of the sync, the last synchronisation with a link to its
-history, and the state of the scheduled task with a link to its settings.
+history, and the state of the scheduled task with a link to the *Automation* page.
 
 ## First run
 
-![First run](../screenshots/en/02-first-run.png)
+![First run](../screenshots/en/03-first-run.png)
 
 Creates `config.toml` from the template built into CodexSync, keeping every
 comment:
@@ -90,7 +111,7 @@ name, finds a workspace codexSync created earlier, and creates nothing inside
 
 ## Synchronisation
 
-![Synchronisation](../screenshots/en/03-sync.png)
+![Synchronisation](../screenshots/en/04-sync.png)
 
 The cloud → local and local → cloud plan.
 
@@ -109,7 +130,7 @@ See [Synchronisation](SYNC.md).
 
 ## Chat bindings
 
-![Chat bindings](../screenshots/en/04-chats.png)
+![Chat bindings](../screenshots/en/05-chats.png)
 
 Which project each chat is under, and why. This is not a chat window: it shows a
 chat's opening message, date, id, record count and folder, grouped by project.
@@ -134,7 +155,7 @@ See [Projects and chats](PROJECTS.md#chats).
 
 ## Sessions
 
-![Sessions](../screenshots/en/05-sessions.png)
+![Sessions](../screenshots/en/06-sessions.png)
 
 How each branch of a session compares across two machines. Choose where the
 sessions were recorded and which machine this is, then **Scan**. Scanning reads
@@ -157,7 +178,7 @@ See [Sessions](SESSIONS.md).
 
 ## Projects
 
-![Projects](../screenshots/en/06-projects.png)
+![Projects](../screenshots/en/07-projects.png)
 
 Projects, their roots and their chats counted by reason (pinned, by path, by rule
 only), plus chats under no project. Select a project to **show its chats**,
@@ -175,7 +196,7 @@ See [Projects and chats](PROJECTS.md).
 
 ## Snapshot guardian
 
-![Snapshot guardian](../screenshots/en/07-guardian.png)
+![Snapshot guardian](../screenshots/en/08-guardian.png)
 
 Verified snapshots of `.codex-global-state.json`, taken outside `.codex`.
 
@@ -195,7 +216,7 @@ See [Guardian](GUARDIAN.md).
 
 ## Backups
 
-![Backups](../screenshots/en/08-backups.png)
+![Backups](../screenshots/en/09-backups.png)
 
 The backups in the backup directory with the machine that made them, whether
 their manifest verifies, file count, size and format. **Restore** — choose a
@@ -207,7 +228,7 @@ See [Backups and recovery](RECOVERY.md).
 
 ## Recovery
 
-![Recovery](../screenshots/en/09-recovery.png)
+![Recovery](../screenshots/en/10-recovery.png)
 
 Every write keeps a journal. An unfinished journal blocks every new change until
 it is resumed or rolled back — that block is the protection.
@@ -217,15 +238,39 @@ it is resumed or rolled back — that block is the protection.
 - **Resume** closes the journal after verifying the backup still matches; then
   run the interrupted command again, which re-plans from what is on disk.
 - **Roll back into** restores the snapshot the operation created, then closes the
-  journal. The target is never guessed: a sync can back up both sides.
+  journal. Each file goes back to the side it was backed up from; choosing a side
+  is needed only for an older restore whose snapshot does not record it.
 
 Each action has its own check (dry run) that must pass first.
 
 See [Backups and recovery](RECOVERY.md#interrupted-mutations).
 
+## Automation
+
+![Automation](../screenshots/en/11-automation.png)
+
+Every task the operating system runs for CodexSync, on one page, edited the way
+*Settings* edits: the values are `config.toml`, and **Save and update the
+tasks** saves them (with the usual review) and then installs what is on and
+removes what is off.
+
+- **Regular safe job** — a Guardian snapshot, `preflight` or a sync dry run,
+  never a write; its interval, start after sign-in and random delay; whether the
+  installed task matches the config, its last and next run, and what the last
+  exit code meant. **Run now** runs the job in the window.
+- **After signing in** — the delay for everything that starts at sign-in, and
+  the one-time settings sync.
+- **Copies of `.codex`** — the folder (your choice; nothing is proposed), a copy
+  after signing in and/or every N hours, how many to keep, the copies that
+  exist, and **Make a copy now**, which is refused while Codex is open: the task
+  is the one that waits.
+
+See [Configuration → Automation](CONFIGURATION.md#automation) and
+[Copies of `.codex`](CONFIGURATION.md#copies-of-codex).
+
 ## Settings
 
-![Settings](../screenshots/en/10-settings.png)
+![Settings](../screenshots/en/12-settings.png)
 
 **Settings are `config.toml`.** The file is read into a draft; nothing is
 written until you save.
@@ -235,7 +280,6 @@ written until you save.
 | General | Machine name and directories. Each path shows what it resolves to; `${workspace_root}` stands for the workspace folder. |
 | Synchronisation | Comparison, conflict policy, direction, deletions, what is included (picked from a tree) and excluded. |
 | Protection | Process detection and Guardian. `safety.*` is shown but never editable. |
-| Automation | The scheduled task: its job, interval and start after sign-in; whether the installed task matches the config, its last and next run, and what the last exit code meant. |
 | Project paths | `[[path_mappings]]` rules, written in a form. |
 | Service data | Backups, the session mirror, the sync manifest, logging, and the config history. |
 
@@ -260,13 +304,9 @@ The language switch is at the top of the screen. The window itself remembers
 only its size, the last screen, the language and which config it opened last —
 never the contents of `config.toml`.
 
-**Automation** can run only a safe job — a Guardian snapshot, `preflight` or a
-sync dry run — never a write. See
-[Configuration → Automation](CONFIGURATION.md#automation).
-
 ## About
 
-![About](../screenshots/en/11-about.png)
+![About](../screenshots/en/13-about.png)
 
 What the program is, the four rules every write obeys, what it deliberately
 leaves to you, and **this build** — version, whether it is a packaged

@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 import json
+import math
 from pathlib import Path
 import tomllib
 from types import MappingProxyType
@@ -58,7 +59,7 @@ from .config_edit import (
     set_value,
 )
 from .exceptions import ConfigError, ConflictError
-from .models import MIN_SCHEDULER_INTERVAL_SECONDS
+from .models import MAX_SCHEDULER_INTERVAL_SECONDS, MIN_SCHEDULER_INTERVAL_SECONDS
 from .process_knowledge import (
     OS_KEYS,
     missing_background_process_names,
@@ -95,6 +96,7 @@ MISSING_EXCLUDE_SKILLS_SYSTEM = "MISSING_EXCLUDE_SKILLS_SYSTEM"
 OBSOLETE_INCLUDE_ROOT = "OBSOLETE_INCLUDE_ROOT"
 LEGACY_SCHEDULER_KEYS = "LEGACY_SCHEDULER_KEYS"
 SCHEDULER_INTERVAL_MIGRATED = "SCHEDULER_INTERVAL_MIGRATED"
+SCHEDULER_INTERVAL_TOO_SHORT = "SCHEDULER_INTERVAL_TOO_SHORT"
 SECTION_ABSENT = "SECTION_ABSENT"
 
 #: Every code `inspect_config` can emit. A window renders each from its own
@@ -108,6 +110,7 @@ FINDING_CODES: tuple[str, ...] = (
     MISSING_EXCLUDE_SKILLS_SYSTEM,
     OBSOLETE_INCLUDE_ROOT,
     SCHEDULER_INTERVAL_MIGRATED,
+    SCHEDULER_INTERVAL_TOO_SHORT,
     LEGACY_SCHEDULER_KEYS,
     *(f"{SECTION_ABSENT}_{name.upper()}" for name in OPTIONAL_SECTIONS),
 )
@@ -384,6 +387,26 @@ def _blocking_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
             "plan only and every mutating command refuses it",
             (ConfigEdit("set", "sync", "session_mode", "all"),),
         )
+    seconds = _table(document, "scheduler").get("interval_seconds")
+    if (
+        isinstance(seconds, int)
+        and not isinstance(seconds, bool)
+        and 0 < seconds < MIN_SCHEDULER_INTERVAL_SECONDS
+    ):
+        # The loader refuses a period under five minutes, so every command
+        # exits 4 until it is raised. Raised to the minimum rather than to the
+        # default: the user asked for "often", and five minutes is the most
+        # often this version runs a job.
+        yield ConfigFinding(
+            SCHEDULER_INTERVAL_TOO_SHORT, BLOCKER,
+            f"scheduler.interval_seconds = {seconds} is shorter than the "
+            f"{MIN_SCHEDULER_INTERVAL_SECONDS}-second minimum; it becomes "
+            f"{MIN_SCHEDULER_INTERVAL_SECONDS}",
+            (ConfigEdit("set", "scheduler", "interval_seconds", MIN_SCHEDULER_INTERVAL_SECONDS),),
+            params=MappingProxyType(
+                {"seconds": str(seconds), "minimum": str(MIN_SCHEDULER_INTERVAL_SECONDS)}
+            ),
+        )
 
 
 def _detection_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
@@ -477,10 +500,15 @@ def _correctness_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
     carries_period = (
         isinstance(minutes, (int, float))
         and not isinstance(minutes, bool)
+        and math.isfinite(minutes)
         and "interval_seconds" not in scheduler
     )
     if carries_period:
-        seconds = max(int(minutes * 60), MIN_SCHEDULER_INTERVAL_SECONDS)
+        # Clamped both ways: a migrated value the loader then refuses would
+        # turn `config upgrade` into the thing that breaks the config.
+        seconds = min(
+            max(int(minutes * 60), MIN_SCHEDULER_INTERVAL_SECONDS), MAX_SCHEDULER_INTERVAL_SECONDS
+        )
         # The old key is removed by this finding and not by the one below:
         # dropping it on its own would silently reset the period the user
         # chose to the default, which is the opposite of a migration.

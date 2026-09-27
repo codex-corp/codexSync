@@ -50,8 +50,8 @@ codexsync -c config.toml chats list --source-machine desktop --target-machine la
 不写；而真正写入时 Codex 必须关闭：
 
 ```powershell
-codexsync -c config.toml chats move --chat 01a00ab4 --to LabTakt
-codexsync -c config.toml chats move --chat 01a00ab4 --to LabTakt --confirm <计划标识>
+codexsync -c config.toml chats move --chat 3f9c2e71 --to Atlas
+codexsync -c config.toml chats move --chat 3f9c2e71 --to Atlas --confirm <计划标识>
 ```
 
 - 这里没有计划文件：标识既覆盖各项决定，*也*覆盖读取它们时状态的确切字节，所以只要有
@@ -82,6 +82,11 @@ codexsync -c config.toml repair-projects apply --plan repair-plan.json --confirm
 - **重新指定根目录从不单独出现。** 搬家之前创建的对话记录的是旧文件夹，把根目录从它
   移走会让这些对话消失。因此仍然位于旧根目录之下的每个会话，都会同时被固定到这个项目上。
   如果还有这样的对话没被覆盖到，计划会报告 `REMAP_ORPHANS_SESSIONS`，并且拒绝执行。
+  旧根目录之下已经属于*另一个*项目的对话（嵌套项目，或是你把它移过去的项目）不会被抢走：
+  计划会报告 `REMAP_SESSION_BOUND_ELSEWHERE`，在你决定它的归属之前拒绝执行。
+- **文件夹在本机不属于任何项目的对话**会列为 `SKIP_NO_PROJECT`，保持原样。桌面版的项目
+  条目带有 codexSync 不会凭空编造的字段，所以它从不在那里创建项目：请在 Codex 中创建
+  项目后重新扫描。这样的对话不再阻塞计划的其余部分。
 - **两个候选项**都映射到同一个新根目录时，会报告为 `AMBIGUOUS_PROJECT`，并且什么都不执行。
 - **会话文件内部的任何内容都永远不会被修改。** 一条记录的原始字节就是它在分支比较中的
   身份，因此在里面改写 `cwd` 会让同一段历史在两台机器上永久分叉。
@@ -91,7 +96,7 @@ codexsync -c config.toml repair-projects apply --plan repair-plan.json --confirm
 `project-move` 在一台机器上完成搬移本身：
 
 ```powershell
-codexsync -c config.toml project-move scan --project LabTakt --to D:/Work/labtakt --save-plan move.json
+codexsync -c config.toml project-move scan --project Atlas --to D:/Work/atlas --save-plan move.json
 codexsync -c config.toml project-move apply --plan move.json --confirm-plan <计划标识> --dry-run
 codexsync -c config.toml project-move apply --plan move.json --confirm-plan <计划标识>
 ```

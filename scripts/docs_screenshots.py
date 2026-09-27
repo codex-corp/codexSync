@@ -36,10 +36,13 @@ from codexsync.app import (  # noqa: E402
     BackupSnapshotInfo,
     GuardianInventory,
     JournalInfo,
+    StateBackupEntry,
     create_config,
+    set_value,
 )
 from codexsync.chat_directory import Association, ChatDirectory, ChatEntry, ChatKind, ProjectView  # noqa: E402
 from codexsync.guardian_inventory import GuardianSnapshotInfo, QuarantineInfo  # noqa: E402
+from codexsync.home_stats import CopiesStats, GuardianStats, HomeSummary, StateStats, SyncStats  # noqa: E402
 from codexsync.gui.controller import (  # noqa: E402
     BuildInfo,
     CheckRow,
@@ -66,6 +69,8 @@ MACHINE = "desktop"
 OTHER = "laptop"
 HOME = "C:/Users/you"
 WORKSPACE = "D:/Cloud/codexSync"
+#: Where the demo keeps its copies of .codex: off the cloud folder, as advised.
+COPIES = "E:/Backups/codex"
 
 PROJECTS = {
     "8f1c2a90-1d4e-4b6a-9a51-2c7e0b3f5a11": ("Atlas", "D:/Projects/atlas"),
@@ -231,13 +236,51 @@ class DemoController(Controller):
         return Outcome(value=StateView(rows, True, 0, 1))
 
     def automation(self) -> Outcome:
+        exe = f"{HOME}/AppData/Local/CodexSync/codexsync-gui.exe"
         return Outcome(value=AutomationView(
             True, "guardian_snapshot", 300, True, 30, 0,
-            (f"{HOME}/AppData/Local/CodexSync/codexsync-gui.exe", "-c", f"{WORKSPACE}/config.toml",
-             "guardian", "snapshot", "--once"),
+            (exe, "-c", f"{WORKSPACE}/config.toml", "guardian", "snapshot", "--once"),
             (), True,
             SchedulerStatus(True, True, "2026-09-17T08:15:00Z", "2026-09-17T08:20:00Z", 0, "", True),
             None,
+            backup_root=Path(COPIES),
+            backup_at_login=True,
+            backup_interval_hours=24,
+            backup_keep=5,
+            backup_argv=(exe, "-c", f"{WORKSPACE}/config.toml", "state-backup", "create", "--wait"),
+            backup_status=SchedulerStatus(True, True, "2026-09-17T07:05:00Z", "2026-09-18T07:05:00Z", 0, "", True),
+        ))
+
+    def codex_backups(self) -> Outcome:
+        stamps = (
+            ("20260917T070512Z", 402_118_904), ("20260916T070433Z", 399_870_115),
+            ("20260915T184102Z", 398_004_771), ("20260914T070219Z", 391_552_360),
+            ("20260913T070651Z", 388_417_042),
+        )
+        return Outcome(value=[
+            StateBackupEntry(
+                f"codex-{MACHINE}-{stamp}.zip", Path(COPIES) / f"codex-{MACHINE}-{stamp}.zip", MACHINE,
+                f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}T{stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}Z", size, True,
+            )
+            for stamp, size in stamps
+        ])
+
+    def home(self) -> Outcome:
+        last = JournalInfo(
+            "9a3e1c70-5b2d-4e8f-a164-0c7d2b9e3f51", "sync", "COMMITTED", "2026-09-17T08:02:10Z", 5,
+            f"{MACHINE}-20260917T080210Z-8c41d2e0a9b3.zip", True, True, False, False, True,
+            counts={"to_cloud": 3, "to_local": 2}, origin="window", finished_at_utc="2026-09-17T08:02:14Z",
+        )
+        return Outcome(value=HomeSummary(
+            codex="stopped",
+            sync=SyncStats(last, 14, 1, 37, 22),
+            open_journals=0,
+            backups=CopiesStats(3, 10_263_535, "2026-09-17T08:02:10Z"),
+            copies=CopiesStats(5, 1_979_963_192, "2026-09-17T07:05:12Z"),
+            copies_configured=True,
+            guardian=GuardianStats("2026-09-17T08:15:00.000000Z", 5, 1, 0),
+            automation=self.automation().value,
+            state=StateStats("2026-09-17T08:10:00Z", 31, 24, 4, 4, 1, 0, 148 * 1024 * 1024),
         ))
 
     def preview_sync(self) -> Outcome:
@@ -355,6 +398,17 @@ def _demo_config(directory: Path) -> Path:
             'from = "C:/Work"\n'
             'to = "D:/Projects"\n'
         )
+    # What the demo automation status says is installed, so the page's own
+    # form and its OS lines tell the same story.
+    text = path.read_text(encoding="utf-8")
+    for section, key, value in (
+        ("scheduler", "enabled", True), ("scheduler", "interval_seconds", 300),
+        ("scheduler", "startup_delay_seconds", 30),
+        ("state_backup", "root_dir", COPIES), ("state_backup", "at_login", True),
+        ("state_backup", "interval_hours", 24),
+    ):
+        text = set_value(text, section, key, value)
+    path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -367,9 +421,19 @@ class _InlineRunner:
 
 #: What each page does after it opens, so it shows a filled screen rather than
 #: an empty one waiting for a button.
+def _show_copies(screen) -> None:
+    """The copies of .codex are the part of the Automation page worth a picture."""
+    from PySide6.QtWidgets import QScrollArea
+
+    area = screen.findChild(QScrollArea)
+    if area is not None:
+        area.ensureWidgetVisible(screen.copy_now, 0, 24)
+
+
 PREPARE = {
     "sessions": lambda screen: screen.scan(),
     "projects": lambda screen: screen.scan(),
+    "automation": _show_copies,
 }
 
 

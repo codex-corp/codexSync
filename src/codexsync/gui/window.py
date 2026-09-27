@@ -49,11 +49,13 @@ from .locations import (
     write_config_pointer,
 )
 from .screens.about import AboutModel, AboutScreen
+from .screens.automation import AutomationModel, AutomationScreen
 from .screens.backups import BackupsModel, BackupsScreen
 from .screens.base import Model, Screen
 from .screens.chats import ChatsModel, ChatsScreen
 from .screens.first_run import FirstRunModel, FirstRunScreen
 from .screens.guardian import GuardianModel, GuardianScreen
+from .screens.home import HomeModel, HomeScreen
 from .screens.overview import OverviewModel, OverviewScreen
 from .screens.projects import ProjectsModel, ProjectsScreen
 from .screens.journals import RecoveryModel, RecoveryScreen
@@ -72,6 +74,7 @@ BRAND_MARK_DARK = RESOURCES / "brand-mark-dark.png"
 #: Screens in sidebar order. The id names the catalogue keys (``nav.<id>``,
 #: ``page.<id>.subtitle``) and is what the window remembers as the last tab.
 PAGES = (
+    "home",
     "overview",
     "first_run",
     "sync",
@@ -81,11 +84,13 @@ PAGES = (
     "guardian",
     "backups",
     "recovery",
+    "automation",
     "settings",
     "about",
 )
 
 SCREENS: dict[str, tuple[type[Screen], type[Model]]] = {
+    "home": (HomeScreen, HomeModel),
     "overview": (OverviewScreen, OverviewModel),
     "first_run": (FirstRunScreen, FirstRunModel),
     "sync": (SyncScreen, SyncModel),
@@ -95,6 +100,7 @@ SCREENS: dict[str, tuple[type[Screen], type[Model]]] = {
     "guardian": (GuardianScreen, GuardianModel),
     "backups": (BackupsScreen, BackupsModel),
     "recovery": (RecoveryScreen, RecoveryModel),
+    "automation": (AutomationScreen, AutomationModel),
     "settings": (SettingsScreen, SettingsModel),
     "about": (AboutScreen, AboutModel),
 }
@@ -183,6 +189,10 @@ class MainWindow(QMainWindow):
         self._active: dict[Any, tuple[str, Callable[[Any, Outcome], None], bool, float, Model]] = {}
         #: token -> (phase, done, total); the last report a running read made.
         self._progress: dict[Any, tuple[str, int, int]] = {}
+        #: Bumped whenever the same config file is saved. A read started under
+        #: an older generation built its result from the previous rules, and
+        #: is not delivered as if it had not (see `run`).
+        self._generation = 0
         self._activity_timer = QTimer(self)
         self._activity_timer.setInterval(1000)
         self._activity_timer.timeout.connect(self._update_activity)
@@ -191,7 +201,7 @@ class MainWindow(QMainWindow):
         if not controller.config_exists():
             start = "first_run"
         else:
-            start = stored_page if stored_page in PAGES else "overview"
+            start = stored_page if stored_page in PAGES else "home"
         self._build(PAGES.index(start))
 
         hints = QGuiApplication.styleHints()
@@ -238,14 +248,28 @@ class MainWindow(QMainWindow):
         """
         key: list[Any] = [None]
         model = self._models[page]
+        generation = self._generation
 
         def done(outcome: Outcome) -> None:
             self._active.pop(key[0], None)
             self._progress.pop(key[0], None)
+            stale = cancellable and generation != self._generation
+            if stale:
+                # The file was saved while this read ran: `config_changed`
+                # already forgot every plan, and this one was built under the
+                # old rules. It still has to be applied -- only the result
+                # clears the page's busy flag -- but as a refusal, and the
+                # page forgets whatever it held from before the save.
+                outcome = Outcome(failure=Failure.STOPPED_SAFELY, message=self._catalog.text("activity.stale"))
             apply(model, outcome)
+            if stale:
+                model.reset_plans()
             screen = self._screens.get(page)
             if screen is not None and self._models[page] is model:
                 screen.render()
+                if stale and self._stack.currentWidget() is screen:
+                    # A page that reads on arrival reads again now.
+                    screen.activated()
             self._update_activity()
 
         def report(phase: str, count: int, total: int) -> None:
@@ -372,6 +396,7 @@ class MainWindow(QMainWindow):
             self._config_choice = None
             self._models = {page: SCREENS[page][1]() for page in PAGES}
         else:
+            self._generation += 1
             for model in self._models.values():
                 model.reset_plans()
         self._remember_config()

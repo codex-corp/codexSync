@@ -113,14 +113,21 @@ def _validate_stable_metadata(observation: SourceObservation) -> ValidationRepor
 
 
 def _validate_bom(payload: bytes) -> ValidationReport | None:
-    if any(payload.find(bom) >= 0 for bom in _UTF32_BOMS):
+    """A byte-order mark is a property of the file's first bytes only.
+
+    Past offset 0 the same bytes are ordinary content: ``EF BB BF`` is U+FEFF,
+    which is valid inside a JSON string (a project name can carry one), and
+    the UTF-16/32 marks cannot occur in valid UTF-8 at all, so the decoder and
+    the NUL check reject them anyway. Searching the whole file made one such
+    character quarantine every state and refuse every global-state commit
+    (CS-311).
+    """
+    if payload.startswith(_UTF32_BOMS) or payload.startswith(_UTF16_BOMS):
         return ValidationReport(ValidationStatus.INVALID, (UNSUPPORTED_BOM,))
-    if any(payload.find(bom) >= 0 for bom in _UTF16_BOMS):
-        return ValidationReport(ValidationStatus.INVALID, (UNSUPPORTED_BOM,))
-    bom_index = payload.find(_UTF8_BOM)
-    if bom_index == -1:
+    if not payload.startswith(_UTF8_BOM):
         return None
-    if bom_index != 0 or payload.find(_UTF8_BOM, len(_UTF8_BOM)) != -1:
+    if payload.startswith(_UTF8_BOM, len(_UTF8_BOM)):
+        # Two marks in a row: the second would reach the JSON parser as content.
         return ValidationReport(ValidationStatus.INVALID, (UNSUPPORTED_BOM,))
     return ValidationReport(ValidationStatus.PASS_WITH_WARNING, (UTF8_BOM,))
 

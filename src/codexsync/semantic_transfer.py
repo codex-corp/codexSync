@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .exceptions import FailSafeError
-from .jsonl_codec import JsonlCodec, codec_of, logical_name, with_codec
+from .jsonl_codec import JsonlCodec, codec_of, logical_name, logical_relative_path, with_codec
 from .path_mapping import PathMappingError, PathMappingRule, apply_path_mapping, path_flavor
 from .semantic_merge import (
     CANONICAL_DIGEST_VERSION,
@@ -53,7 +53,14 @@ from .semantic_merge import (
     BranchState,
     compare_session_branches,
 )
-from .session_catalog import RECORD_FORMAT_RANK, SessionCatalog, SessionDescriptor, SessionState
+from .session_catalog import (
+    DUPLICATE_SESSION_ID,
+    INVALID_CODES,
+    RECORD_FORMAT_RANK,
+    SessionCatalog,
+    SessionDescriptor,
+    SessionState,
+)
 from .sqlite_audit import PlacementStatus, ThreadPlacements
 
 
@@ -78,6 +85,12 @@ class TransferAction(str, Enum):
     BLOCKED_TARGET_COLLISION = "BLOCKED_TARGET_COLLISION"
     #: The runtime binding lives in a store codexSync will not write.
     BLOCKED_UNSUPPORTED_BACKEND = "BLOCKED_UNSUPPORTED_BACKEND"
+    #: A copy of this session cannot be read as one branch -- unreadable,
+    #: truncated, or one id in two files -- or the destination already holds a
+    #: file that is not this session's. Nothing is written for it on either
+    #: side: a copy that cannot be compared is not a copy that is absent, and
+    #: overwriting it would replace a history nobody looked at.
+    BLOCKED_INVALID_BRANCH = "BLOCKED_INVALID_BRANCH"
     #: Outside the working set: nothing is written into `.codex` for this
     #: session, and it blocks nothing. The cloud mirror is written regardless,
     #: so the backup stays complete whatever the working set says.
@@ -199,6 +212,24 @@ NEWER_FORMAT_REMOTE = "NEWER_FORMAT_REMOTE"
 #: it may carry work the rewrite never saw -- a turn taken on another machine
 #: before it was upgraded. The bulk decision leaves such a conflict to a person.
 OLDER_FORMAT_HAS_LATER_RECORDS = "OLDER_FORMAT_HAS_LATER_RECORDS"
+
+
+#: Conflicts of content, the only kind a format rewrite can explain.
+_DIVERGENCES = frozenset({BranchRelation.DIVERGED, BranchRelation.DIVERGED_NO_COMMON_RECORDS})
+
+#: The two copies could not be read side by side, though each read alone.
+COMPARISON_FAILED = "COMPARISON_FAILED"
+#: A file already sits where a copy of a session the destination lacks would go.
+DESTINATION_OCCUPIED = "DESTINATION_OCCUPIED"
+#: The mirror already holds this branch under another path than the source
+#: does, and it is rewritten there rather than gaining a second file.
+MIRROR_PATH_KEPT = "MIRROR_PATH_KEPT"
+#: A proven layout renders another path than the one this machine keeps the
+#: session under.
+LAYOUT_DISAGREES_WITH_BRANCH = "LAYOUT_DISAGREES_WITH_BRANCH"
+#: A working set was chosen and covers no session: nothing is written into
+#: `.codex`, and the mirror is written in full as always.
+WORKING_SET_MATCHES_NOTHING = "WORKING_SET_MATCHES_NOTHING"
 
 
 def _format_migration_codes(local: SessionDescriptor, remote: SessionDescriptor) -> tuple[str, ...]:
@@ -329,6 +360,11 @@ class TransferPlan:
     #: working sets existed meant -- and why an empty scope is left out of the
     #: id material entirely, so those plans keep the id they had.
     scope: tuple[str, ...] = ()
+    #: A working set was chosen and names no session at all -- a project with
+    #: no chats yet, say. `scope` alone cannot say that, because empty means
+    #: "everything": without this a plan would be built narrowed, rebuilt
+    #: unnarrowed, and its id could never match.
+    scope_matches_nothing: bool = False
 
     @property
     def out_of_scope_items(self) -> tuple["TransferItem", ...]:
@@ -341,6 +377,13 @@ class TransferPlan:
     @property
     def blocked_items(self) -> tuple[TransferItem, ...]:
         return tuple(item for item in self.items if item.action.is_blocked)
+
+
+def plan_scope(plan: TransferPlan) -> tuple[str, ...] | None:
+    """The working set a plan was built under, in the form `build_transfer_plan` takes."""
+    if plan.scope or plan.scope_matches_nothing:
+        return plan.scope
+    return None
 
 
 def conflict_id_for(session_hash: str, local_sha256: str, remote_sha256: str) -> str:
@@ -430,18 +473,32 @@ def build_transfer_plan(
     confirmed_bases = confirmed_bases or set()
     codes: list[str] = []
 
-    local_by_id = _by_session_id(local_catalog)
-    remote_by_id = _by_session_id(remote_catalog)
+    # Every copy that names a session id, readable or not. A branch that cannot
+    # be read is still that session's branch: treating it as absent would make
+    # the session one-sided and let a copy land on top of it unread.
+    local_groups = _groups_by_session_id(local_catalog)
+    remote_groups = _groups_by_session_id(remote_catalog)
+    codes.extend(_idless_codes(local_catalog, "LOCAL"))
+    codes.extend(_idless_codes(remote_catalog, "REMOTE"))
+    occupied = _destination_check(local_root, remote_root, local_catalog, remote_catalog)
     if local_catalog.volatile or remote_catalog.volatile:
         volatile = True
 
     items: list[TransferItem] = []
     claimed_targets: dict[str, str] = {}
 
-    for session_id in sorted(set(local_by_id) | set(remote_by_id)):
+    for session_id in sorted(set(local_groups) | set(remote_groups)):
         session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-        local = local_by_id.get(session_id)
-        remote = remote_by_id.get(session_id)
+        unusable = _unusable_item(
+            session_hash, local_groups.get(session_id, ()), remote_groups.get(session_id, ())
+        )
+        if unusable is not None:
+            items.append(unusable)
+            codes.extend(unusable.codes)
+            continue
+        # Past that check each side holds at most one copy, and it is valid.
+        local = next(iter(local_groups.get(session_id, ())), None)
+        remote = next(iter(remote_groups.get(session_id, ())), None)
 
         if local is None or remote is None:
             # One side simply does not have this session yet. That is a plain
@@ -454,6 +511,7 @@ def build_transfer_plan(
                     mirror_codec=mirror_codec,
                     claimed_targets=claimed_targets,
                     cwd_code=cwd_code,
+                    occupied=occupied,
                 )
             )
             continue
@@ -475,16 +533,22 @@ def build_transfer_plan(
             mirror_codec=mirror_codec,
             claimed_targets=claimed_targets,
             cwd_code=cwd_code,
+            occupied=occupied,
         )
         items.append(item)
         codes.extend(item.codes)
 
+    scope_matches_nothing = False
     if scope is not None:
-        items = [_apply_scope(item, set(scope)) for item in items]
+        scope = set(scope)
+        scope_matches_nothing = not scope
+        items = [_apply_scope(item, scope) for item in items]
         codes.extend(
             code for item in items if item.action is TransferAction.OUT_OF_SCOPE
             for code in item.codes
         )
+        if scope_matches_nothing:
+            codes.append(WORKING_SET_MATCHES_NOTHING)
     # One-sided items do not feed the plan's codes, but a missing folder is
     # worth saying at plan level whichever kind of item it was found on.
     codes.extend(code for item in items for code in item.codes if code in _CWD_CODES)
@@ -495,6 +559,7 @@ def build_transfer_plan(
         layout_id, CANONICAL_DIGEST_VERSION, volatile,
         tuple(items), tuple(dict.fromkeys(codes)), mirror_layout_id(mirror_codec),
         tuple(sorted(scope)) if scope else (),
+        scope_matches_nothing,
     )
     return _with_plan_id(plan)
 
@@ -510,7 +575,11 @@ def _apply_scope(item: TransferItem, scope: set[str]) -> TransferItem:
     """
     if item.session_hash in scope:
         return item
-    if item.action in {TransferAction.NOOP, TransferAction.FAST_FORWARD_REMOTE}:
+    # An unusable branch keeps saying so: it holds back the mirror too, which a
+    # working set never narrows, so calling it out of scope would hide that.
+    if item.action in {
+        TransferAction.NOOP, TransferAction.FAST_FORWARD_REMOTE, TransferAction.BLOCKED_INVALID_BRANCH,
+    }:
         return item
     return TransferItem(
         item.session_hash, item.relation, TransferAction.OUT_OF_SCOPE,
@@ -536,6 +605,7 @@ def _decide(
     mirror_codec: JsonlCodec,
     claimed_targets: dict[str, str],
     cwd_code: Callable[[SessionDescriptor], str | None] | None = None,
+    occupied: Callable[[str, str], bool] | None = None,
 ) -> TransferItem:
     def make(action: TransferAction, *, target: str | None = None, conflict: str | None = None,
              extra: tuple[str, ...] = ()) -> TransferItem:
@@ -549,9 +619,26 @@ def _decide(
     if comparison.relation is BranchRelation.IDENTICAL:
         return make(TransferAction.NOOP)
 
+    if comparison.relation is BranchRelation.INVALID:
+        # Each copy read cleanly alone, but not side by side: one changed or
+        # broke in between. There are no branch hashes a decision could be
+        # pinned to, so this is not a conflict anyone can resolve -- the
+        # session is left alone until it reads cleanly.
+        return TransferItem(
+            session_hash, comparison.relation, TransferAction.BLOCKED_INVALID_BRANCH,
+            local.sha256, remote.sha256, local.line_count, remote.line_count,
+            None, None, (COMPARISON_FAILED,),
+        )
+
     if comparison.is_conflict:
         conflict = conflict_id_for(session_hash, comparison.local_sha256, comparison.remote_sha256)
-        kind = _format_migration_codes(local, remote)
+        # Only a divergence of content can be a format rewrite. A missing base
+        # is an archive move waiting for proof of ancestry, and labelling it
+        # would let `--format-migrations` overwrite one side of it in bulk.
+        kind = (
+            _format_migration_codes(local, remote)
+            if comparison.relation in _DIVERGENCES else ()
+        )
         resolution = resolutions.get(conflict)
         if resolution is None:
             previous = resolutions_by_session.get(session_hash)
@@ -573,7 +660,7 @@ def _decide(
         return _gate_write(
             make, resolved, session_id, local, remote,
             placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
-            claimed_targets=claimed_targets, cwd_code=cwd_code,
+            claimed_targets=claimed_targets, cwd_code=cwd_code, occupied=occupied,
             conflict=conflict, extra=kind + ("RESOLVED_BY_USER",),
         )
 
@@ -585,7 +672,7 @@ def _decide(
     return _gate_write(
         make, action, session_id, local, remote,
         placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
-        claimed_targets=claimed_targets, cwd_code=cwd_code,
+        claimed_targets=claimed_targets, cwd_code=cwd_code, occupied=occupied,
     )
 
 
@@ -600,6 +687,7 @@ def _one_sided_item(
     mirror_codec: JsonlCodec,
     claimed_targets: dict[str, str],
     cwd_code: Callable[[SessionDescriptor], str | None] | None = None,
+    occupied: Callable[[str, str], bool] | None = None,
 ) -> TransferItem:
     """Decide a session that exists on one side only.
 
@@ -627,7 +715,7 @@ def _one_sided_item(
     return _gate_write(
         make, action, session_id, local, remote,
         placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
-        claimed_targets=claimed_targets, cwd_code=cwd_code,
+        claimed_targets=claimed_targets, cwd_code=cwd_code, occupied=occupied,
         extra=("SESSION_ON_ONE_SIDE_ONLY",),
     )
 
@@ -644,6 +732,7 @@ def _gate_write(
     mirror_codec: JsonlCodec,
     claimed_targets: dict[str, str],
     cwd_code: Callable[[SessionDescriptor], str | None] | None = None,
+    occupied: Callable[[str, str], bool] | None = None,
     conflict: str | None = None,
     extra: tuple[str, ...] = (),
 ) -> TransferItem:
@@ -673,12 +762,20 @@ def _gate_write(
         # session is never compared, mirrored or fast-forwarded again, with no
         # error at all. Converting an existing mirror needs a delete, so it is
         # refused here in the same way an archive transition is.
+        #
+        # The path follows the same rule. A branch the mirror already holds is
+        # rewritten where it is, whatever path the source keeps it under: a chat
+        # archived here and still active in the mirror would otherwise gain a
+        # second file there -- the same duplicate by another route.
         stored = codec_of(remote.relative_path) if remote is not None else None
         codec = mirror_codec if stored is None else stored
-        side, target = "mirror", mirror_relative_path(source, codec)
+        side = "mirror"
+        target = remote.relative_path if remote is not None else mirror_relative_path(source, codec)
         extra = extra + ("MIRROR_DESTINATION",)
         if stored is not None and stored is not mirror_codec:
             extra = extra + ("MIRROR_CONTAINER_KEPT",)
+        if remote is not None and logical_relative_path(target) != logical_relative_path(source.relative_path):
+            extra = extra + (MIRROR_PATH_KEPT,)
     elif layout_id not in PROVEN_LAYOUTS:
         return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra)
     else:
@@ -689,6 +786,24 @@ def _gate_write(
                 TransferAction.BLOCKED_UNSUPPORTED_BACKEND,
                 target=target, conflict=conflict, extra=extra + objection,
             )
+        if local is not None and target != local.relative_path:
+            # This machine keeps the session somewhere the layout does not
+            # render. Writing the rendered path would leave two files for one
+            # id, and moving the old one needs a delete.
+            return make(
+                TransferAction.BLOCKED_UNPROVEN_LAYOUT,
+                target=target, conflict=conflict, extra=extra + (LAYOUT_DISAGREES_WITH_BRANCH,),
+            )
+
+    destination = remote if side == "mirror" else local
+    if destination is None and occupied is not None and occupied(side, target):
+        # Nothing on that side is this session, yet a file sits where the copy
+        # would go: a branch whose id could not be read, or one not attributed
+        # to any session. Replacing it would destroy a history nobody compared.
+        return make(
+            TransferAction.BLOCKED_INVALID_BRANCH,
+            target=target, conflict=conflict, extra=extra + (DESTINATION_OCCUPIED,),
+        )
 
     # Two destinations only collide when they are the same file, and the two
     # sides are different roots, so the side is part of the claim.
@@ -851,6 +966,7 @@ def load_transfer_plan(path: Path) -> TransferPlan:
             tuple(str(code) for code in raw.get("codes", ())),
             str(raw["mirror_layout_id"]),
             tuple(str(item) for item in raw.get("scope", ())),
+            raw.get("scope_matches_nothing") is True,
         )
     except _PlanRejected:
         # A refusal that already knows why: the generic guard below would
@@ -880,6 +996,9 @@ def _serialise(plan: TransferPlan) -> dict:
         # Left out entirely when empty: a plan without a working set has to
         # hash to exactly what it hashed to before working sets existed.
         **({"scope": list(plan.scope)} if plan.scope else {}),
+        # The same rule: present only when it says something, so no plan
+        # built before it existed changes its id.
+        **({"scope_matches_nothing": True} if plan.scope_matches_nothing else {}),
         "items": [
             {
                 "session_hash": item.session_hash,
@@ -911,7 +1030,7 @@ def _with_plan_id(plan: TransferPlan) -> TransferPlan:
     return TransferPlan(
         plan.version, digest, plan.created_at_utc, plan.source_machine, plan.target_machine,
         plan.layout_id, plan.canonical_version, plan.volatile, plan.items, plan.codes,
-        plan.mirror_layout_id, plan.scope,
+        plan.mirror_layout_id, plan.scope, plan.scope_matches_nothing,
     )
 
 
@@ -921,6 +1040,91 @@ def descriptors_by_session_hash(catalog: SessionCatalog) -> dict[str, SessionDes
         hashlib.sha256(session_id.encode("utf-8")).hexdigest(): descriptor
         for session_id, descriptor in _by_session_id(catalog).items()
     }
+
+
+def _groups_by_session_id(catalog: SessionCatalog) -> dict[str, tuple[SessionDescriptor, ...]]:
+    """Every descriptor that names a session id, valid or not, per id."""
+    groups: dict[str, list[SessionDescriptor]] = {}
+    for descriptor in catalog.descriptors:
+        if descriptor.session_id:
+            groups.setdefault(descriptor.session_id, []).append(descriptor)
+    return {session_id: tuple(items) for session_id, items in groups.items()}
+
+
+def _idless_codes(catalog: SessionCatalog, side: str) -> tuple[str, ...]:
+    """Whether a branch file's session id could not be read at all.
+
+    Such a file belongs to no item, because an item is a session, but it is
+    still a file a copy could land on, and the plan says it is there.
+    """
+    if any(not descriptor.session_id for descriptor in catalog.descriptors):
+        return (f"{side}_BRANCH_WITHOUT_ID",)
+    return ()
+
+
+def _unusable_item(
+    session_hash: str,
+    local_all: tuple[SessionDescriptor, ...],
+    remote_all: tuple[SessionDescriptor, ...],
+) -> TransferItem | None:
+    """The blocked item for a session one of whose copies cannot be used, if any."""
+    codes: list[str] = []
+    for side, group in (("LOCAL", local_all), ("REMOTE", remote_all)):
+        if len(group) > 1:
+            codes.append(f"{side}_{DUPLICATE_SESSION_ID}")
+        elif group and group[0].state in {SessionState.INVALID, SessionState.AMBIGUOUS}:
+            codes.append(f"{side}_BRANCH_INVALID")
+            codes.extend(code for code in group[0].codes if code in INVALID_CODES)
+    if not codes:
+        return None
+    return TransferItem(
+        session_hash, BranchRelation.INVALID, TransferAction.BLOCKED_INVALID_BRANCH,
+        _group_sha256(local_all), _group_sha256(remote_all),
+        local_all[0].line_count if len(local_all) == 1 else 0,
+        remote_all[0].line_count if len(remote_all) == 1 else 0,
+        None, None, tuple(dict.fromkeys(codes)),
+    )
+
+
+def _group_sha256(group: tuple[SessionDescriptor, ...]) -> str:
+    """One copy's branch hash, or one hash over several copies.
+
+    Either way a change to any copy changes the plan id, so a plan confirmed
+    while a file was broken is not applied after it was repaired.
+    """
+    if not group:
+        return ""
+    if len(group) == 1:
+        return group[0].sha256
+    material = "\0".join(sorted(descriptor.sha256 for descriptor in group))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _destination_check(
+    local_root: Path, remote_root: Path, local_catalog: SessionCatalog, remote_catalog: SessionCatalog
+) -> Callable[[str, str], bool]:
+    """Whether a destination already holds a file, in any container. Reads only.
+
+    Asked only for a session the destination side does not hold, so anything
+    found there belongs to something else, which the copy must not replace.
+    The catalogue is consulted first and the disk second: a file the catalogue
+    skipped is still a file.
+    """
+    known = {
+        "local": {logical_relative_path(item.relative_path) for item in local_catalog.descriptors},
+        "mirror": {logical_relative_path(item.relative_path) for item in remote_catalog.descriptors},
+    }
+    roots = {"local": local_root, "mirror": remote_root}
+
+    def occupied(side: str, target: str) -> bool:
+        logical = logical_relative_path(target)
+        if logical in known[side]:
+            return True
+        return any(
+            os.path.lexists(roots[side] / _os_path(with_codec(logical, codec))) for codec in JsonlCodec
+        )
+
+    return occupied
 
 
 def _by_session_id(catalog: SessionCatalog) -> dict[str, SessionDescriptor]:

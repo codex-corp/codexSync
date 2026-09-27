@@ -51,9 +51,10 @@ from pathlib import Path
 import shutil
 from uuid import uuid4
 
-from .jsonl_codec import JsonlCodec, codec_of, open_jsonl, transcode, with_codec
+from .jsonl_codec import JSONL_READ_ERRORS, JsonlCodec, codec_of, open_jsonl, transcode, with_codec
 
 from .exceptions import FailSafeError
+from .semantic_transfer import conflict_id_for
 
 
 SEMANTIC_MANIFEST_FORMAT = "codexsync-semantic-manifest-v1"
@@ -299,13 +300,46 @@ class SemanticStore:
 
     # --- conflict bundles --------------------------------------------------
 
-    def conflict_bundle(self, left: Path, right: Path, *, session_id: str, common_records: int) -> Path:
+    def conflict_bundle(
+        self,
+        left: Path,
+        right: Path,
+        *,
+        session_id: str,
+        common_records: int,
+        expected: tuple[str, str] | None = None,
+    ) -> Path:
+        """Keep both branches of one conflict, named by the conflict's own id.
+
+        ``expected`` is the pair of branch hashes the user's resolution was
+        pinned to; a branch that no longer hashes to it is refused rather than
+        preserved as if it were the history that was decided about.
+
+        The directory is the id `sessions scan` printed and `sessions resolve`
+        took. Bundles written before that were named by a hash of the session
+        id instead, and one of those that still verifies is the same bundle --
+        it is returned rather than written a second time.
+        """
         left_hash, left_size, _ = _file_metrics(left)
         right_hash, right_size, _ = _file_metrics(right)
-        conflict_id = hashlib.sha256(f"{session_id}\0{left_hash}\0{right_hash}".encode("utf-8")).hexdigest()
-        destination = self.root / "conflicts" / conflict_id
+        if expected is not None and (left_hash, right_hash) != tuple(expected):
+            raise FailSafeError("A branch changed after its conflict was resolved; it was not bundled")
+        conflict_id = conflict_id_for(session_hash_for(session_id), left_hash, right_hash)
+        legacy_id = hashlib.sha256(f"{session_id}\0{left_hash}\0{right_hash}".encode("utf-8")).hexdigest()
+        conflicts = self.root / "conflicts"
+        destination = conflicts / conflict_id
+        for candidate in (destination, conflicts / legacy_id):
+            if _bundle_holds(candidate, left_hash, right_hash):
+                return candidate
         if destination.is_dir():
-            return destination
+            if (destination / "COMMITTED").exists():
+                # Committed, yet not these branches: something changed it
+                # afterwards. It is the only copy of something, so it is left
+                # exactly as it is.
+                raise FailSafeError(f"Conflict bundle {conflict_id} does not hold the branches it names")
+            # A previous attempt stopped before its marker: it proves nothing,
+            # and this one is about to be verified.
+            shutil.rmtree(destination)
         stage = self.root / ".staging" / "conflicts" / uuid4().hex
         _mkdir_private(stage)
         # The bundle is the archival copy of a history that lost, so it keeps
@@ -314,6 +348,9 @@ class SemanticStore:
         # id here the same id the user confirmed.
         _copy_logical(left, stage / "left.jsonl")
         _copy_logical(right, stage / "right.jsonl")
+        if not _bundle_holds(stage, left_hash, right_hash, committed=False):
+            shutil.rmtree(stage, ignore_errors=True)
+            raise FailSafeError("A conflict bundle failed verification before it was committed")
         _chmod_file(stage / "left.jsonl")
         _chmod_file(stage / "right.jsonl")
         _write_json(stage / "manifest.json", {
@@ -371,6 +408,19 @@ def _digest(body: dict) -> str:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _bundle_holds(directory: Path, left_hash: str, right_hash: str, *, committed: bool = True) -> bool:
+    """Whether a bundle directory holds exactly these two branches."""
+    if committed and not (directory / "COMMITTED").is_file():
+        return False
+    try:
+        return (
+            _file_metrics(directory / "left.jsonl")[0] == left_hash
+            and _file_metrics(directory / "right.jsonl")[0] == right_hash
+        )
+    except JSONL_READ_ERRORS:
+        return False
 
 
 def _copy_logical(source: Path, destination: Path) -> None:

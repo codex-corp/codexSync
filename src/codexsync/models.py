@@ -72,6 +72,9 @@ class FiltersConfig:
 @dataclass(slots=True)
 class TargetsConfig:
     include_roots: list[str] = field(default_factory=list)
+    #: Whether the file names `include_roots` at all. A written empty list is
+    #: refused; an absent key synchronises nothing (CS-289).
+    listed: bool = False
 
 
 @dataclass(slots=True)
@@ -111,9 +114,17 @@ class SemanticConfig:
 #: thing that decides a write is safe. `sync` is deliberately not a mode.
 SCHEDULER_MODES: tuple[str, ...] = ("guardian_snapshot", "preflight", "sync_dry_run")
 
-#: Shortest accepted repeat interval. The operating system schedulers cannot
-#: reliably honour less, and a Guardian snapshot already polls on its own.
-MIN_SCHEDULER_INTERVAL_SECONDS = 60
+#: Shortest accepted repeat interval: five minutes. A periodic job is a
+#: safety net, not a watcher -- Guardian's snapshot is worth taking when the
+#: state has had time to change, and each run samples the process list and
+#: may write a snapshot into a cloud-synced folder.
+MIN_SCHEDULER_INTERVAL_SECONDS = 300
+#: What a config that names no interval gets: half an hour.
+DEFAULT_SCHEDULER_INTERVAL_SECONDS = 1800
+#: Task Scheduler's longest repetition interval (`RepetitionPattern.Interval`):
+#: a task asking for more is refused at registration. Every platform is held
+#: to it, so one config means the same schedule everywhere.
+MAX_SCHEDULER_INTERVAL_SECONDS = 31 * 24 * 3600
 
 
 @dataclass(slots=True, frozen=True)
@@ -127,13 +138,45 @@ class SchedulerConfig:
 
     enabled: bool = False
     mode: str = "guardian_snapshot"
-    interval_seconds: int = 60
+    interval_seconds: int = DEFAULT_SCHEDULER_INTERVAL_SECONDS
     run_at_login: bool = True
     startup_delay_seconds: int = 0
     jitter_seconds: int = 0
     #: A settings sync once after sign-in, in its own task (CS-267, `D-016`).
     #: Independent of ``enabled``/``mode``, which stay read-only and periodic.
     sync_at_login: bool = False
+
+
+#: Longest accepted period between two copies of the Codex state: the OS
+#: repetition limit (31 days), since the copy runs as a repeating OS task.
+MAX_STATE_BACKUP_INTERVAL_HOURS = MAX_SCHEDULER_INTERVAL_SECONDS // 3600
+
+
+@dataclass(slots=True, frozen=True)
+class StateBackupConfig:
+    """The `[state_backup]` section (CS-276, `D-017`): copies of `.codex`.
+
+    ``root_dir`` is ``None`` until the user chooses a folder: nothing proposes
+    one, and without it no copy is taken and no task can be switched on.
+    Values are kept as read and checked by `_validate_config`, like
+    `SchedulerConfig`.
+    """
+
+    root_dir: Path | None = None
+    #: A copy once after signing in (waiting for Codex to close if it is open).
+    at_login: bool = False
+    #: A copy every N hours; 0 switches the periodic copy off.
+    interval_hours: int = 0
+    #: How many copies of this machine to keep; the oldest go only after a
+    #: newer copy has been written and verified.
+    keep: int = 5
+
+    @property
+    def scheduled(self) -> bool:
+        return self.at_login is True or (
+            isinstance(self.interval_hours, int) and not isinstance(self.interval_hours, bool)
+            and self.interval_hours > 0
+        )
 
 
 @dataclass(slots=True)
@@ -153,6 +196,7 @@ class AppConfig:
     path_mappings: list[PathMappingRule] = field(default_factory=list)
     semantic: SemanticConfig = field(default_factory=lambda: SemanticConfig(root_dir=Path("semantic")))
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    state_backup: StateBackupConfig = field(default_factory=StateBackupConfig)
 
 
 @dataclass(slots=True, frozen=True)
@@ -195,8 +239,21 @@ class ManifestEntry:
 
 @dataclass(slots=True)
 class SyncManifest:
+    """The two-sided fingerprints one machine recorded at its last sync.
+
+    The file lives beside the cloud mirror and is shared by every machine, so
+    it holds one baseline *per machine* (CS-288): ``files`` is this machine's,
+    and ``others`` carries every other machine's entries through untouched.
+    A single shared pair made machine B read machine A's local fingerprint as
+    its own, see its stale file as "changed", and copy it over A's newer one.
+    """
+
     data_version: int
     files: dict[str, ManifestEntry] = field(default_factory=dict)
+    #: Whose baseline ``files`` is; ``None`` only for an empty manifest.
+    machine_id: str | None = None
+    #: Other machines' baselines, kept exactly as read so saving never drops them.
+    others: dict[str, dict[str, ManifestEntry]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

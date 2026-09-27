@@ -55,8 +55,8 @@ Moving is a preview first. `chats move` writes nothing until you repeat it with
 the plan id it printed, and Codex must be closed for the write:
 
 ```powershell
-codexsync -c config.toml chats move --chat 01a00ab4 --to LabTakt
-codexsync -c config.toml chats move --chat 01a00ab4 --to LabTakt --confirm <plan-id>
+codexsync -c config.toml chats move --chat 3f9c2e71 --to Atlas
+codexsync -c config.toml chats move --chat 3f9c2e71 --to Atlas --confirm <plan-id>
 ```
 
 - There is no plan file: the id covers the decisions *and* the exact bytes of the
@@ -92,7 +92,13 @@ process check.
   folder, and moving the root away from it would make them disappear. So every
   session still under the old root is also pinned to the project. If any such chat
   would be left uncovered, the plan reports `REMAP_ORPHANS_SESSIONS` and the apply
-  refuses.
+  refuses. A chat under the old root that already belongs to *another* project
+  (a nested project, or one you moved it to) is not taken over: the plan reports
+  `REMAP_SESSION_BOUND_ELSEWHERE` and refuses until you decide where it belongs.
+- **A chat whose folder is no project here** is listed as `SKIP_NO_PROJECT` and
+  left alone. The desktop build's project entries carry fields codexSync does not
+  invent, so it never creates a project there: create it in Codex and scan again.
+  Such a chat no longer blocks the rest of the plan.
 - **Two candidates** that both map onto the same new root are reported as
   `AMBIGUOUS_PROJECT`, and nothing is applied.
 - **Nothing inside a session file is ever edited.** A record's raw bytes are its
@@ -104,7 +110,7 @@ process check.
 `project-move` does the move itself, on one machine:
 
 ```powershell
-codexsync -c config.toml project-move scan --project LabTakt --to D:/Work/labtakt --save-plan move.json
+codexsync -c config.toml project-move scan --project Atlas --to D:/Work/atlas --save-plan move.json
 codexsync -c config.toml project-move apply --plan move.json --confirm-plan <plan-id> --dry-run
 codexsync -c config.toml project-move apply --plan move.json --confirm-plan <plan-id>
 ```

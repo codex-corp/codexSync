@@ -31,6 +31,7 @@ PHASES: tuple[str, ...] = (
     "sessions",
     "sessions_cloud",
     "chats",
+    "state_backup",
 )
 
 

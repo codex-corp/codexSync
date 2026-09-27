@@ -28,7 +28,7 @@
 > macOS 机器之间做过端到端的交接验证。
 
 <p align="center">
-  <a href="docs/zh/GUI.md"><img src="docs/screenshots/zh/01-overview.png" width="85%" alt="CodexSync 窗口：概览"></a>
+  <a href="docs/zh/GUI.md"><img src="docs/screenshots/zh/02-overview.png" width="85%" alt="CodexSync 窗口：概览"></a>
 </p>
 
 ## 它能做什么

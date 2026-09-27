@@ -73,8 +73,11 @@ def build_guardian_manifest(
         previous_id = None
         previous_sha256 = None
     else:
-        if previous_good.generation + 1 != snapshot.generation:
-            raise GuardianIntegrityError("Guardian generation must advance exactly by one")
+        # Strictly greater, not exactly one more: the next number comes from
+        # every manifest the store holds (CS-297), and the predecessor is the
+        # latest-good baseline, which need not be the highest generation.
+        if previous_good.generation >= snapshot.generation:
+            raise GuardianIntegrityError("Guardian generation must advance past its predecessor")
         previous_id = previous_good.snapshot_id
         previous_sha256 = previous_good.sha256
 
@@ -243,7 +246,7 @@ def _validate_predecessor(manifest: GuardianManifest, predecessor: GuardianManif
         raise GuardianIntegrityError("Guardian manifest predecessor SHA-256 is invalid")
     if predecessor is not None:
         validate_guardian_manifest(predecessor)
-        if predecessor.generation + 1 != manifest.generation:
+        if predecessor.generation >= manifest.generation:
             raise GuardianIntegrityError("Guardian manifest predecessor generation is inconsistent")
         if predecessor.snapshot_id != previous_id or predecessor.sha256 != previous_sha:
             raise GuardianIntegrityError("Guardian manifest predecessor does not match declared previous good snapshot")

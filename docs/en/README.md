@@ -15,7 +15,7 @@
 | [Projects and chats](PROJECTS.md) | Chat bindings, repair after a handoff, moving a project |
 | [Backups and recovery](RECOVERY.md) | Backups, restore, interrupted mutations |
 
-[![The CodexSync window](../screenshots/en/01-overview.png)](GUI.md)
+[![The CodexSync window](../screenshots/en/02-overview.png)](GUI.md)
 
 *The window over the same core as the command line — [every screen, with screenshots](GUI.md).*
 

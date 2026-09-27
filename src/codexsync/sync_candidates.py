@@ -30,19 +30,10 @@ from pathlib import Path
 
 from .filters import PathFilter
 from .models import AppConfig
-from .runtime import _is_semantic_owned
-from .state_locator import detect_local_state_dir
+from .runtime import SECRET_NAMES, _is_semantic_owned
+from .state_locator import locate_local_state_dir
 
 __all__ = ["SyncCandidate", "SECRET_NAMES", "list_sync_candidates"]
-
-#: Names that hold credentials. Never listed, on either side.
-SECRET_NAMES = frozenset({
-    "auth.json",
-    "cap_sid",
-    ".sandbox-secrets",
-    "credentials.json",
-    "token.json",
-})
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +71,7 @@ def list_sync_candidates(cfg: AppConfig, relative: str = "") -> tuple[SyncCandid
     dialog only ever shows one level at a time anyway.
     """
     node = relative.replace("\\", "/").strip("/")
-    local_root = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_root = locate_local_state_dir(cfg)
     roots = {"local": local_root, "cloud": cfg.paths.cloud_root_dir}
 
     found: dict[str, dict[str, bool]] = {}

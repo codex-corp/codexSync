@@ -28,7 +28,7 @@
 > и в CI, но полный перенос между настоящими macOS-машинами ещё не проверялся.
 
 <p align="center">
-  <a href="docs/ru/GUI.md"><img src="docs/screenshots/ru/01-overview.png" width="85%" alt="Окно CodexSync: обзор"></a>
+  <a href="docs/ru/GUI.md"><img src="docs/screenshots/ru/02-overview.png" width="85%" alt="Окно CodexSync: обзор"></a>
 </p>
 
 ## Что делает

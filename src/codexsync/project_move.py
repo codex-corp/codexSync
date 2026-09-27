@@ -44,6 +44,7 @@ import stat
 from typing import Any, Callable, Iterable, Sequence
 
 from .exceptions import ConfigError, ConflictError, FailSafeError
+from .fs_links import FILE_ATTRIBUTE_REPARSE_POINT, is_link
 from .guardian_models import ValidationStatus
 from .guardian_schema import (
     binding_project_id,
@@ -91,10 +92,7 @@ DIRECTORY_SIZE = -1
 #: the person's file.
 STAGING_MARKER_NAME = ".codexsync-staging.json"
 _READ_CHUNK = 1024 * 1024
-_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-#: Bit Windows sets on every reparse tag that *names another location*: symlinks,
-#: junctions, WSL links. Tags without it hold the data themselves.
-_REPARSE_TAG_NAME_SURROGATE = 0x20000000
+_FILE_ATTRIBUTE_REPARSE_POINT = FILE_ATTRIBUTE_REPARSE_POINT
 #: How many offending paths a blocked plan names. Enough to act on; a project
 #: with thousands of unreadable files does not need all of them in a preview.
 MAX_BLOCKED_PATHS = 50
@@ -313,7 +311,13 @@ def build_project_move_plan(
             and _is_plain_directory(new_root_text)
         ):
             target = _walk(new_root_text, hash_files=True)
-            copy_complete = not target.codes and inventory_digest(target.entries) == inventory_sha
+            # A run interrupted right after the rename leaves its staging
+            # marker at the top of the copy; the source cannot hold that name.
+            entries = tuple(
+                item for item in target.entries
+                if not (item.relative_path == STAGING_MARKER_NAME and item.size != DIRECTORY_SIZE)
+            )
+            copy_complete = not target.codes and inventory_digest(entries) == inventory_sha
         if not copy_complete:
             codes.append(TARGET_EXISTS)
 
@@ -495,9 +499,11 @@ def apply_project_move(
 
     if plan.copy_complete:
         LOG.info("project move: %s already holds a verified copy; skipping the copy", plan.new_root)
+        # A run that stopped right after the rename leaves the staging marker
+        # inside the copy; the rescan discounted it, and it goes before commit.
+        _remove_staging_marker_from(plan.new_root)
     else:
         _copy_into_place(plan, require_stopped)
-        _write_resume_marker(plan)
 
     require_stopped()
     try:
@@ -565,6 +571,13 @@ def _copy_into_place(plan: ProjectMovePlan, require_stopped: Callable[[], None])
     Every failure before the rename removes the staging directory — it was
     created by this very call, so removing it destroys nothing but a partial
     copy — and a failure never reaches the source tree, which is only read.
+
+    Two markers make every crash point recoverable by a rescan. The staging
+    marker stays inside the staging directory until *after* the rename, so a
+    staging directory is never left without the proof that it is ours (which
+    ``_clear_own_staging`` needs to remove it). The resume marker is written
+    *before* the rename, so a verified copy is never left under the target name
+    without the marker that lets a rescan report it as ``copy_complete``.
     """
     staging = _staging_path(plan.new_root, plan.plan_id)
     norm_staging = _norm(staging)
@@ -609,16 +622,47 @@ def _copy_into_place(plan: ProjectMovePlan, require_stopped: Callable[[], None])
                 )
         _require_source_unchanged(plan, source_mtimes)
 
-        os.remove(marker_path)
         require_stopped()
         if os.path.lexists(plan.new_root):
             # Never merge into, or replace, a folder that appeared meanwhile.
             raise FailSafeError(f"{plan.new_root} appeared during the copy; nothing was moved")
-        os.replace(staging, plan.new_root)
+        _write_resume_marker(plan)
+        try:
+            os.replace(staging, plan.new_root)
+        except BaseException:
+            if os.path.lexists(staging):
+                # The rename did not happen, so the marker names no copy.
+                _remove_resume_marker(plan)
+            raise
     except BaseException:
         _remove_staging_created_here(staging)
         raise
     LOG.warning("project move: verified copy renamed into place at %s", plan.new_root)
+    _remove_staging_marker_from(plan.new_root)
+
+
+def _remove_staging_marker_from(new_root: str) -> None:
+    """Remove the staging marker the rename carried into the finished copy.
+
+    The source is refused if it holds a file of this name, so one at the top
+    of the copy can only be the marker this module wrote.
+    """
+    path = os.path.join(new_root, STAGING_MARKER_NAME)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise FailSafeError(f"Cannot inspect {path}; the Codex state was not changed: {exc}") from exc
+    if not stat.S_ISREG(info.st_mode) or _is_link(path, info):
+        raise FailSafeError(f"{path} is not the staging marker this move wrote; inspect it")
+    try:
+        os.remove(path)
+    except OSError as exc:
+        raise FailSafeError(
+            f"The verified copy is at {new_root} but its staging marker could not be removed, "
+            f"so the Codex state was not changed; preview again to finish: {exc}"
+        ) from exc
 
 
 def _require_source_unchanged(plan: ProjectMovePlan, source_mtimes: dict[str, int]) -> None:
@@ -698,8 +742,8 @@ def _write_resume_marker(plan: ProjectMovePlan) -> None:
         os.replace(temp, marker)
     except OSError as exc:
         raise FailSafeError(
-            f"The verified copy is at {plan.new_root} but its resume marker could not be written, "
-            f"so the Codex state was not changed: {exc}"
+            f"The resume marker for {plan.new_root} could not be written, so the verified copy "
+            f"was not moved into place and the Codex state was not changed: {exc}"
         ) from exc
 
 
@@ -871,19 +915,10 @@ def _is_link(path: str, info: os.stat_result) -> bool:
     of 18 projects on a real machine unmovable. What separates a link is the
     name-surrogate bit Windows sets on every tag that names another location.
     Only when the tag cannot be read at all is a reparse point assumed to be a
-    link, because then nothing proves it is not.
+    link, because then nothing proves it is not. The rule lives in
+    ``fs_links`` so the `.codex` copy and the session catalogue use the same one.
     """
-    if stat.S_ISLNK(info.st_mode):
-        return True
-    isjunction = getattr(os.path, "isjunction", None)
-    if isjunction is not None and isjunction(path):
-        return True
-    if not getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
-        return False
-    tag = getattr(info, "st_reparse_tag", None)
-    if not isinstance(tag, int) or tag == 0:
-        return True
-    return bool(tag & _REPARSE_TAG_NAME_SURROGATE)
+    return is_link(path, info)
 
 
 def _is_plain_directory(path: str) -> bool:

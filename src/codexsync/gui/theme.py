@@ -154,6 +154,7 @@ QMainWindow, #content {{ background: {p.background}; }}
     border-radius: {SURFACE_CORNER_RADIUS}px;
 }}
 #cardTitle {{ font-size: 12pt; font-weight: 500; }}
+#tileValue {{ font-size: 15pt; font-weight: 500; }}
 #bannerTitle {{ font-size: 11.5pt; font-weight: 500; }}
 QTableWidget, QTreeWidget {{
     background: {p.surface};

@@ -17,6 +17,11 @@ than a missing feature:
   command itself refuses unattended what needs a person -- ``--unattended``
   forces ``manual_abort`` on conflicts -- and the process gate refuses it
   whenever Codex is open, so at worst it does nothing.
+* **The copy of `.codex` has a task of its own too** (`D-017`,
+  ``STATE_BACKUP_SLOT``). ``state-backup create --wait`` only reads the state
+  directory and writes into the folder the user chose; it waits for Codex to
+  close instead of copying files that are being written, which is why its
+  task is allowed a day rather than ten minutes.
 * **User level only.** Task Scheduler runs the task as the current user with
   ``InteractiveToken``/``LeastPrivilege``; launchd gets a LaunchAgent, systemd
   a ``--user`` unit. Nothing asks for elevation, nothing registers as SYSTEM
@@ -74,12 +79,23 @@ JOB_MODES: tuple[str, ...] = tuple(_JOB_SUBCOMMANDS)
 LOGIN_SYNC_MODE = "sync_at_login"
 _JOB_SUBCOMMANDS[LOGIN_SYNC_MODE] = ("sync", "--apply", "--unattended")
 
-#: Which of this user's two tasks an adapter manages.
+#: A copy of the valuable part of `.codex` (`[state_backup]`, `D-017`): after
+#: sign-in and/or every N hours, waiting for Codex to close when it is open.
+STATE_BACKUP_MODE = "state_backup"
+_JOB_SUBCOMMANDS[STATE_BACKUP_MODE] = ("state-backup", "create", "--wait")
+
+#: Which of this user's three tasks an adapter manages.
 JOB_SLOT = "job"
 LOGIN_SYNC_SLOT = "sync-at-login"
-SLOTS = (JOB_SLOT, LOGIN_SYNC_SLOT)
+STATE_BACKUP_SLOT = "state-backup"
+SLOTS = (JOB_SLOT, LOGIN_SYNC_SLOT, STATE_BACKUP_SLOT)
+
+#: The mode each slot runs, for the slots that run exactly one.
+_SLOT_MODES = {LOGIN_SYNC_SLOT: LOGIN_SYNC_MODE, STATE_BACKUP_SLOT: STATE_BACKUP_MODE}
 
 MIN_INTERVAL_SECONDS = 60
+#: The copy's period is whole hours: a copy of a gigabyte is not a minute job.
+MIN_STATE_BACKUP_INTERVAL_SECONDS = 3600
 
 
 class SchedulerError(RuntimeError):
@@ -113,6 +129,23 @@ class ScheduledJob:
             _require_non_negative_int(self.startup_delay_seconds, "startup_delay_seconds")
             if self.jitter_seconds != 0:
                 raise ValueError("the login sync takes no jitter")
+            return
+        if self.mode == STATE_BACKUP_MODE:
+            if not isinstance(self.run_at_login, bool):
+                raise ValueError("run_at_login must be a bool")
+            if self.interval_seconds is not None and (
+                isinstance(self.interval_seconds, bool)
+                or not isinstance(self.interval_seconds, int)
+                or self.interval_seconds < MIN_STATE_BACKUP_INTERVAL_SECONDS
+            ):
+                raise ValueError(
+                    f"the copy's interval_seconds must be None or >= {MIN_STATE_BACKUP_INTERVAL_SECONDS}"
+                )
+            if self.interval_seconds is None and not self.run_at_login:
+                raise ValueError("a copy that runs neither at sign-in nor on an interval never runs")
+            _require_non_negative_int(self.startup_delay_seconds, "startup_delay_seconds")
+            if self.jitter_seconds != 0:
+                raise ValueError("the copy takes no jitter")
             return
         if self.mode not in JOB_MODES:
             raise ValueError(f"Unsupported scheduled job mode: {self.mode!r}; expected one of {', '.join(JOB_MODES)}")
@@ -452,21 +485,49 @@ def _require_slot(slot: str) -> str:
 
 
 def _slot_matches_job(slot: str, job: ScheduledJob) -> None:
-    """The login slot runs the login sync and nothing else, and vice versa."""
-    if (slot == LOGIN_SYNC_SLOT) != (job.mode == LOGIN_SYNC_MODE):
-        raise ValueError(f"The {slot} task cannot run the {job.mode} job")
+    """Each dedicated slot runs its one job and nothing else, and vice versa."""
+    wanted = _SLOT_MODES.get(slot)
+    if wanted is not None and job.mode == wanted:
+        return
+    if wanted is None and job.mode in JOB_MODES:
+        return
+    raise ValueError(f"The {slot} task cannot run the {job.mode} job")
 
 
 def _job_description(job: ScheduledJob) -> str:
     if job.mode == LOGIN_SYNC_MODE:
         return "codexSync settings sync once after sign-in; refused while Codex is open"
+    if job.mode == STATE_BACKUP_MODE:
+        return "codexSync copy of the Codex state; waits until Codex is closed"
     return f"codexSync periodic read-only job ({job.mode})"
+
+
+def _first_run_at_sign_in(job: ScheduledJob) -> bool:
+    """The job's first run is the next sign-in, never the moment it is installed.
+
+    True for the login sync and for a copy of `.codex` that runs at sign-in:
+    Windows' LogonTrigger never fires at registration, and launchd's RunAtLoad
+    and systemd's OnActiveSec would, so those two are held to the same rule.
+    A copy started at install time would sit waiting for Codex to close.
+    """
+    return job.run_at_login and (job.interval_seconds is None or job.mode == STATE_BACKUP_MODE)
+
+
+def _time_limit_seconds(job: ScheduledJob) -> int:
+    """How long the OS lets one run take.
+
+    The copy waits for Codex to close -- up to 23 hours, after which it gives
+    up by itself and says so -- so its limit is a day. Everything else is a
+    short job that must never pile up.
+    """
+    return 24 * 3600 if job.mode == STATE_BACKUP_MODE else 600
 
 
 def system_scheduler(platform: str | None = None, **injections: Any) -> SystemScheduler:
     """The adapter for this OS (or for ``platform``), with test injections.
 
-    ``slot=LOGIN_SYNC_SLOT`` gives the adapter for the sign-in sync task.
+    ``slot=LOGIN_SYNC_SLOT`` gives the adapter for the sign-in sync task,
+    ``slot=STATE_BACKUP_SLOT`` the one for the copy of `.codex`.
     """
     key = _platform_key(platform)
     if key == "windows":
@@ -517,13 +578,17 @@ def task_leaf_name(user_id: str) -> str:
 
 
 def task_name_for(user_id: str, slot: str = JOB_SLOT) -> str:
-    if _require_slot(slot) == LOGIN_SYNC_SLOT:
+    leaf = {LOGIN_SYNC_SLOT: LOGIN_SYNC_TASK_LEAF_NAME, STATE_BACKUP_SLOT: STATE_BACKUP_TASK_LEAF_NAME}.get(
+        _require_slot(slot)
+    )
+    if leaf is not None:
         cleaned = _TASK_NAME_FORBIDDEN.sub("-", user_id.strip()) or "user"
-        return f"{TASK_FOLDER}{LOGIN_SYNC_TASK_LEAF_NAME} ({cleaned})"
+        return f"{TASK_FOLDER}{leaf} ({cleaned})"
     return TASK_FOLDER + task_leaf_name(user_id)
 
 
 LOGIN_SYNC_TASK_LEAF_NAME = "CodexSync Sync at login"
+STATE_BACKUP_TASK_LEAF_NAME = "CodexSync Codex backup"
 _TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 
 #: ``SCHED_S_*`` informational values Task Scheduler puts in LastTaskResult
@@ -672,7 +737,7 @@ def render_task_xml(definition: JobDefinition, *, user_id: str, now: datetime) -
         "    <StartWhenAvailable>true</StartWhenAvailable>",
         "    <Hidden>false</Hidden>",
         "    <Enabled>true</Enabled>",
-        "    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>",
+        f"    <ExecutionTimeLimit>{task_duration(_time_limit_seconds(job))}</ExecutionTimeLimit>",
         "  </Settings>",
         '  <Actions Context="Author">',
         "    <Exec>",
@@ -1175,6 +1240,8 @@ class WindowsTaskScheduler:
 
 LAUNCHD_LABEL = "io.codexsync.job"
 LAUNCHD_LOGIN_SYNC_LABEL = "io.codexsync.sync-at-login"
+LAUNCHD_STATE_BACKUP_LABEL = "io.codexsync.state-backup"
+_LAUNCHD_LABELS = {LOGIN_SYNC_SLOT: LAUNCHD_LOGIN_SYNC_LABEL, STATE_BACKUP_SLOT: LAUNCHD_STATE_BACKUP_LABEL}
 _LAST_EXIT_CODE = re.compile(r"^\s*last exit code\s*=\s*(-?\d+)", re.MULTILINE)
 
 
@@ -1204,7 +1271,7 @@ class LaunchdScheduler:
     ) -> None:
         self._run = run
         self._slot = _require_slot(slot)
-        self.label = LAUNCHD_LOGIN_SYNC_LABEL if self._slot == LOGIN_SYNC_SLOT else LAUNCHD_LABEL
+        self.label = _LAUNCHD_LABELS.get(self._slot, LAUNCHD_LABEL)
         self._home = Path.home() if home is None else Path(home)
         self._uid = uid if uid is not None else getattr(os, "getuid", lambda: 0)()
         self._protected = tuple(default_protected_roots(self._home) if protected_roots is None else protected_roots)
@@ -1250,9 +1317,10 @@ class LaunchdScheduler:
         definition.log_dir.mkdir(parents=True, exist_ok=True)
         _write_atomically(self.plist_path, payload)
         _invoke(self._run, [self.launchctl, "bootout", self._service])  # not loaded is fine
-        if self._slot == LOGIN_SYNC_SLOT:
-            # Loading it now would fire RunAtLoad -- a sync at install time,
-            # not at sign-in. launchd loads every LaunchAgent at the next login.
+        if _first_run_at_sign_in(job):
+            # Loading it now would fire RunAtLoad -- a run at install time,
+            # not at sign-in. launchd loads every LaunchAgent at the next login,
+            # and StartInterval counts from then.
             return
         _require_success(
             _invoke(self._run, [self.launchctl, "bootstrap", self._domain, str(self.plist_path)]),
@@ -1317,6 +1385,8 @@ SYSTEMD_SERVICE = "codexsync-job.service"
 SYSTEMD_TIMER = "codexsync-job.timer"
 SYSTEMD_LOGIN_SYNC_SERVICE = "codexsync-sync-at-login.service"
 SYSTEMD_LOGIN_SYNC_TIMER = "codexsync-sync-at-login.timer"
+SYSTEMD_STATE_BACKUP_SERVICE = "codexsync-state-backup.service"
+SYSTEMD_STATE_BACKUP_TIMER = "codexsync-state-backup.timer"
 _SYSTEMD_SAFE = re.compile(r"^[A-Za-z0-9_@+=:,./-]+$")
 
 
@@ -1418,9 +1488,11 @@ class SystemdUserScheduler:
     ) -> None:
         self._run = run
         self._slot = _require_slot(slot)
-        login = self._slot == LOGIN_SYNC_SLOT
-        self.service = SYSTEMD_LOGIN_SYNC_SERVICE if login else SYSTEMD_SERVICE
-        self.timer = SYSTEMD_LOGIN_SYNC_TIMER if login else SYSTEMD_TIMER
+        self.service, self.timer = {
+            JOB_SLOT: (SYSTEMD_SERVICE, SYSTEMD_TIMER),
+            LOGIN_SYNC_SLOT: (SYSTEMD_LOGIN_SYNC_SERVICE, SYSTEMD_LOGIN_SYNC_TIMER),
+            STATE_BACKUP_SLOT: (SYSTEMD_STATE_BACKUP_SERVICE, SYSTEMD_STATE_BACKUP_TIMER),
+        }[self._slot]
         self._home = Path.home() if home is None else Path(home)
         self._protected = tuple(default_protected_roots(self._home) if protected_roots is None else protected_roots)
         self.systemctl = systemctl
@@ -1443,18 +1515,19 @@ class SystemdUserScheduler:
             "[Service]",
             "Type=oneshot",
             f"ExecStart={exec_start}",
-            "TimeoutStartSec=10min",
+            f"TimeoutStartSec={_time_limit_seconds(job) // 60}min",
             f"StandardOutput=append:{_systemd_path_value(definition.log_dir / f'{stem}.out.log')}",
             f"StandardError=append:{_systemd_path_value(definition.log_dir / f'{stem}.err.log')}",
             "",
         ])
         if job.interval_seconds is None:
-            # OnStartupSec counts from the user manager's start, i.e. sign-in,
-            # and an already elapsed one does not fire: enabling the timer now
-            # schedules the next sign-in rather than a sync at install time.
+            # OnStartupSec counts from the user manager's start, i.e. sign-in.
+            # systemd.timer: one already in the past when the timer is
+            # *started* elapses at once, so `install` enables it without
+            # starting it, and timers.target starts it at the next sign-in.
             timer_text = "\n".join([
                 "[Unit]",
-                "Description=Run codexSync settings sync once after sign-in",
+                f"Description={_job_description(job)}, once after sign-in",
                 "",
                 "[Timer]",
                 f"OnStartupSec={max(job.startup_delay_seconds, 1)}s",
@@ -1467,13 +1540,20 @@ class SystemdUserScheduler:
                 "",
             ])
             return {self.service: service.encode("utf-8"), self.timer: timer_text.encode("utf-8")}
-        first_run = max(job.startup_delay_seconds, 1) if job.run_at_login else job.interval_seconds
+        if _first_run_at_sign_in(job):
+            # OnStartupSec, not OnActiveSec, and `install` does not start the
+            # timer (an elapsed OnStartupSec fires when started): the first run
+            # is the next sign-in, and OnUnitActiveSec counts from that run.
+            first_line = f"OnStartupSec={max(job.startup_delay_seconds, 1)}s"
+        else:
+            first_run = max(job.startup_delay_seconds, 1) if job.run_at_login else job.interval_seconds
+            first_line = f"OnActiveSec={first_run}s"
         timer_lines = [
             "[Unit]",
             f"Description=Run codexSync {job.mode} every {job.interval_seconds} seconds",
             "",
             "[Timer]",
-            f"OnActiveSec={first_run}s",
+            first_line,
             f"OnUnitActiveSec={job.interval_seconds}s",
             # The default accuracy of one minute would let a 60s job drift to 120s.
             "AccuracySec=1s",
@@ -1498,6 +1578,11 @@ class SystemdUserScheduler:
             _write_atomically(self.unit_dir / name, payload)
         _require_success(_invoke(self._run, self._ctl("daemon-reload")), "Reloading systemd user units")
         _require_success(_invoke(self._run, self._ctl("enable", self.timer)), "Enabling the timer")
+        if job.interval_seconds is None or _first_run_at_sign_in(job):
+            # Enabled, not started: a timer started after its OnStartupSec has
+            # passed fires at once, which would run the sign-in sync or copy at
+            # install time. timers.target starts it at the next sign-in.
+            return
         # restart, not start: an already running timer keeps its old schedule
         # until it is re-armed, and an update must take effect now.
         _require_success(_invoke(self._run, self._ctl("restart", self.timer)), "Starting the timer")
@@ -1631,6 +1716,8 @@ def _normalise_unit_text(text: str) -> list[str]:
 
 __all__ = [
     "JOB_MODES",
+    "STATE_BACKUP_MODE",
+    "STATE_BACKUP_SLOT",
     "JobDefinition",
     "LaunchdScheduler",
     "SchedulerError",

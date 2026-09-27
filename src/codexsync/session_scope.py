@@ -1,6 +1,6 @@
 """The working set: which chats a transfer may bring into this `.codex`.
 
-The scenario is one machine's worth of work. A laptop needs `project-chloya`
+The scenario is one machine's worth of work. A laptop needs `project-orion`
 and nothing else; dragging 864 MiB of sessions across for two chats is the
 thing this avoids. So a scope names projects and single chats, and everything
 else is classified, mirrored and left alone.
@@ -195,7 +195,7 @@ def load_session_scope(path: Path) -> SessionScope:
     if not path.is_file():
         return SessionScope()
     raw = json.loads(path.read_text(encoding="utf-8"))
-    if raw.get("format") != SCOPE_FORMAT:
+    if not isinstance(raw, dict) or raw.get("format") != SCOPE_FORMAT:
         raise ValueError(f"unsupported working-set format in {path}")
     return SessionScope(
         projects=tuple(str(item) for item in raw.get("projects", ())),

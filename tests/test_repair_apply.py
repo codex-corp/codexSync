@@ -452,6 +452,54 @@ class RepairRemapApplyTests(unittest.TestCase):
             self._apply()
         self.assertEqual(self.state_file.read_bytes(), before)
 
+    def test_a_chat_outside_every_project_does_not_block_a_remap(self) -> None:
+        """CS-303: the desktop schema cannot create a project, so none is planned."""
+        (self.root / "new" / "other" / ".git").mkdir(parents=True)
+        stray = SessionDescriptor(
+            "thread-stray", SessionState.ACTIVE, "sessions/c.jsonl", "c" * 64, 1, 1,
+            cwd=(self.root / "old" / "other").as_posix(),
+        )
+        self.plan = self._build_plan(extra=[stray])
+        save_repair_plan(self.plan, self.plan_path)
+        stray_kinds = [a.kind for a in self.plan.actions if a.session_id == "thread-stray"]
+        self.assertEqual(stray_kinds, [RepairActionKind.SKIP_NO_PROJECT])
+
+        self._apply()
+        state = json.loads(self.state_file.read_text(encoding="utf-8"))
+        self.assertEqual(list(state["local-projects"]), ["p1"], "no project is invented")
+        self.assertNotIn("thread-stray", state["thread-project-assignments"])
+        self.assertEqual(
+            state["local-projects"]["p1"]["rootPaths"], [str(self.new_root.resolve())]
+        )
+
+    def test_a_plan_binding_one_chat_to_two_projects_is_refused(self) -> None:
+        """CS-300: bindings apply in order, so the second would silently win."""
+        from dataclasses import replace
+        from codexsync.repair_plan import RepairAction, _recompute_plan_id
+
+        state = self._electron_state()
+        state["local-projects"]["n1"] = dict(
+            state["local-projects"]["p1"], id="n1", name="other",
+            rootPaths=[(self.root / "elsewhere").as_posix()],
+        )
+        state["project-order"].append("n1")
+        self._write_state(state)
+        plan = self._build_plan()
+        self.assertEqual(plan.codes, (), "the plan itself is clean; only the forged binding conflicts")
+        stolen = RepairAction(
+            RepairActionKind.ADD_BINDING, plan.actions[0].session_hash, None, "n1",
+            session_id="thread-a",
+        )
+        plan = replace(plan, actions=plan.actions + (stolen,))
+        self.plan = replace(plan, plan_id=_recompute_plan_id(plan))
+        save_repair_plan(self.plan, self.plan_path)
+        before = self.state_file.read_bytes()
+        with self.assertRaises(FailSafeError):
+            self._apply(dry_run=True)
+        with self.assertRaises(FailSafeError):
+            self._apply()
+        self.assertEqual(self.state_file.read_bytes(), before)
+
     def test_a_remap_of_a_root_the_state_no_longer_has_is_refused(self) -> None:
         # The plan is built, then the project moves again behind its back.
         state = self._electron_state()

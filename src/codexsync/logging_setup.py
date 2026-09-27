@@ -1,9 +1,11 @@
 import logging
 import json
+import os
 import platform
 import re
 from datetime import date, timedelta
 from pathlib import Path
+import uuid
 import zipfile
 
 from .models import LoggingConfig
@@ -232,20 +234,40 @@ class _DailySizeRotatingFileHandler(logging.Handler):
             return None
 
     def _archive_stale_text_logs(self) -> None:
+        """Archive text logs of earlier days.
+
+        Only earlier days: a same-day file with another index may be the one a
+        second codexSync process (a scheduled task beside the window) is
+        writing right now.
+        """
         if self._archive_mode != "zip":
             return
         current = self._current_log_path().resolve()
+        today = date.today()
         for path in self._base_file.parent.glob(f"{self._stem}-{self._machine_name}-*{self._suffix}"):
             if not path.is_file():
                 continue
             if path.resolve() == current:
                 continue
-            if self._parse_text_log_name(path.name) is None:
+            parsed = self._parse_text_log_name(path.name)
+            if parsed is None or parsed[0] >= today:
                 continue
             self._archive_log_file(path)
 
     def _archive_log_file(self, source: Path) -> None:
+        """Move ``source`` into a zip, or leave it alone if it is still in use.
+
+        The file is claimed by renaming it first. On Windows that fails while
+        another process has it open, and the archive is skipped until a later
+        rollover; zipping it anyway and then failing to delete it produced a
+        new zip of the same file on every line the other process wrote (CS-318).
+        """
         if not source.exists() or not source.is_file():
+            return
+        claimed = source.with_name(f"{source.name}.{uuid.uuid4().hex[:8]}.archiving")
+        try:
+            os.replace(source, claimed)
+        except OSError:
             return
         zip_path = source.with_name(f"{source.name}.zip")
         counter = 1
@@ -253,8 +275,8 @@ class _DailySizeRotatingFileHandler(logging.Handler):
             zip_path = source.with_name(f"{source.name}.{counter}.zip")
             counter += 1
         with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.write(source, arcname=source.name)
-        source.unlink(missing_ok=True)
+            zf.write(claimed, arcname=source.name)
+        claimed.unlink(missing_ok=True)
 
     def _prune_old_logs(self) -> None:
         if self._retention_days <= 0:

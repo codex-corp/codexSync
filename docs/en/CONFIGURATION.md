@@ -32,7 +32,11 @@ temp_dir = "${workspace_root}/.tmp"
 - **`workspace_root_dir`** is a folder your cloud client syncs between machines.
   `${workspace_root}` in any other path stands for it.
 - **`local_state_dir`** is Codex's own state directory. It is read, written only
-  during a cold operation, and never created.
+  during a cold operation, and never created. If it does not exist, codexSync
+  uses `CODEX_HOME` or `~/.codex` instead, and every command first checks that
+  none of its own folders below (nor Guardian's, the semantic store's or the
+  copies') lies inside the folder it actually uses — otherwise it stops with
+  exit 4 before reading or writing anything.
 - **`cloud_root_dir`** is the mirror of the state in the cloud folder.
 - **`backup_dir`** holds the backups taken before anything is replaced.
 - **`temp_dir`** holds the operation lock and the mutation journal, and is
@@ -41,7 +45,10 @@ temp_dir = "${workspace_root}/.tmp"
   and `.codex` is often on another drive than the cloud folder.
 
 A relative path is resolved against `workspace_root_dir`, or against the folder
-`config.toml` is in when there is no workspace.
+`config.toml` is in when there is no workspace. `cloud_root_dir`, `backup_dir`,
+`temp_dir` and `state.manifest_file` may not lie inside one another: each has an
+owner that removes files from it on its own schedule. A path written with the
+`\\?\` prefix is compared without it.
 
 ## Sections
 
@@ -57,6 +64,7 @@ A relative path is resolved against `workspace_root_dir`, or against the folder
 | `[[path_mappings]]` | How a path on one machine maps onto another | [below](#path_mappings) |
 | `[process_detection]` | Which processes mean "Codex is running" | [below](#process_detection) |
 | `[scheduler]` | The scheduled safe job | [below](#automation) |
+| `[state_backup]` | Copies of `.codex` after sign-in and/or every N hours | [below](#copies-of-codex) |
 | `[logging]` | Level, format, rotation, retention | [below](#logging) |
 | `[safety]` | Fixed: Codex must be stopped, uncertainty aborts | not editable |
 | `[state]` | Where the sync manifest lives | — |
@@ -156,13 +164,13 @@ safety check exists for. `doctor` reports all of this as `config_compat`.
 ## Automation
 
 A scheduled task is the applied form of `[scheduler]`. Set it here or on the
-window's *Settings → Automation* tab, never in the OS scheduler directly.
+window's *Automation* page, never in the OS scheduler directly.
 
 ```toml
 [scheduler]
 enabled = true
 mode = "guardian_snapshot"   # guardian_snapshot | preflight | sync_dry_run
-interval_seconds = 300       # at least 60
+interval_seconds = 1800      # 300 (5 min) to 2678400 (31 days); default 1800 (30 min)
 run_at_login = true
 startup_delay_seconds = 0
 jitter_seconds = 0
@@ -211,6 +219,65 @@ what an upgraded frozen install leaves behind — is reported as
 `EXECUTABLE_MISSING` or `EXECUTABLE_MOVED` instead of a vague "does not match";
 `automation apply` re-registers it for this installation.
 
+## Copies of `.codex`
+
+A copy of the valuable part of the Codex state directory, taken only while Codex
+is closed, into a folder you choose. It stays off until that folder is set:
+nothing proposes one, because a folder a cloud client syncs uploads every copy.
+
+```toml
+[state_backup]
+root_dir = "E:/Backups/codex"   # empty: no copies, the task stays off
+at_login = true                 # a copy after signing in
+interval_hours = 24             # and/or every N hours, at most 744; 0 = off
+keep = 5                        # copies of this machine to keep
+```
+
+```powershell
+codexsync -c config.toml state-backup create          # one copy now; exit 3 while Codex is open
+codexsync -c config.toml state-backup create --wait   # wait for Codex to close first (up to 23 h)
+codexsync -c config.toml state-backup list            # the copies in the folder
+codexsync -c config.toml automation apply             # install the task that takes them
+```
+
+- **What is copied:** sessions and the archive, the global state and its
+  `.bak`, the SQLite catalogues (`state_*`, `thread_history_*`, `memories_*`,
+  `goals_*`, with their `-wal`/`-shm`), `session_index.jsonl`, `config.toml`,
+  `AGENTS.md`, `rules`, `skills`, `memories` and `automations`. **Never:**
+  `auth.json`, `cap_sid`, `.sandbox-secrets` or anything else holding a token,
+  nor caches, logs, the sandbox and temporary files. About 1.2 GB before
+  compression on the machine this was built on. Codex's own `config.toml` is
+  copied whole, and it can hold MCP server tokens (`env` tables, bearer
+  headers): keep `root_dir` somewhere only you can read, and not in a shared
+  folder.
+- **Links are not followed.** A symlink or a Windows junction inside `.codex`
+  (`skills` often holds junctions into other folders) is skipped with everything
+  behind it; a cloud placeholder is an ordinary file and is copied. A folder that
+  cannot be listed fails the copy (exit 5) instead of leaving a hole in it.
+- **Only while Codex is closed.** A copy of a database or a session that is being
+  written is a copy of no particular moment, so the copy goes through the same
+  process check as a write: Codex continuously closed before the first file, and
+  checked again before the copy counts. The scheduled task waits for Codex to
+  close (checking every 30 seconds, for up to 23 hours); `create` without
+  `--wait` and the window's *Make a copy now* refuse instead (exit 3). A file
+  that changes while it is being read fails the copy.
+- **One zip per copy**, `codex-<machine>-<UTC time>.zip`, with a manifest of
+  every file and its SHA-256 inside. It is written as `.partial`, read back and
+  compared, and only then renamed. After that the oldest copies of this machine
+  beyond `keep` are removed; copies another machine left in the same folder are
+  listed and never removed.
+- `root_dir` must be outside `.codex`, `backup_dir`, `temp_dir`, the cloud
+  mirror, `guardian.root_dir` and `semantic.root_dir`: each of those has an
+  owner that prunes, sweeps or mirrors it.
+- It is the third user-level task, `CodexSync Codex backup (<user>)`; at
+  sign-in it also waits `startup_delay_seconds`. A copy only reads `.codex`, and
+  putting one back is by hand: close Codex and unzip what you need.
+- Installing the task never takes a copy: with `at_login` the first copy comes
+  at the next sign-in, on every platform. The task needs the process check,
+  which is proven on Windows only, so on macOS and Linux `automation apply`
+  refuses to install it (and `sync_at_login`) rather than install a task whose
+  every run would stop with exit 5.
+
 ## Logging
 
 ```toml
@@ -228,3 +295,6 @@ max_file_size_mb = 10
 - A file is rotated by day and by size; old files are archived into `.zip`
   (`archive_mode = "zip"`) or kept as text, and removed after `retention_days`.
 - Every dangerous action is logged separately: backup created, overwrite, skip.
+- `file` must be outside `.codex`, and `level` must be one of the listed values.
+- `plan`, `sync`, `restore` and the commands a scheduled task runs (`guardian`,
+  `preflight`, `state-backup`) write to this file.

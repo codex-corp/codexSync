@@ -12,6 +12,7 @@ from datetime import date
 import hashlib
 import logging
 from pathlib import Path
+import platform
 import sys
 import time
 
@@ -53,6 +54,14 @@ def initialize_runtime_paths(cfg: AppConfig) -> None:
             empty_manifest = SyncManifest(data_version=cfg.state.data_version, files={})
             save_manifest(empty_manifest, cfg.state.manifest_file)
 
+def sync_machine_id(cfg: AppConfig) -> str:
+    """Whose baseline this machine reads and writes in the shared sync manifest.
+
+    The same identity backups are named after, so a machine without
+    `identity.machine_id` still gets one stable key (its host name).
+    """
+    return cfg.identity.machine_id or platform.node()
+
 def _ensure_dir(path: Path, field_name: str) -> None:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -83,15 +92,9 @@ def _make_safety_gate(cfg: AppConfig) -> SafetyGate:
     last: dict[str, str] = {"detail": ""}
 
     def sample() -> ProcessState:
-        capability = detector.capability()
-        if not capability.supported:
-            last["detail"] = ""
-            return ProcessState.UNKNOWN
-        snapshot = collect_process_snapshot(cfg, detector=detector)
-        last["detail"] = describe_process_snapshot(snapshot)
-        if snapshot.main_processes or snapshot.sandbox_detected or snapshot.background_processes:
-            return ProcessState.RUNNING
-        return ProcessState.STOPPED
+        state, snapshot = sample_process_state(cfg, detector)
+        last["detail"] = describe_process_snapshot(snapshot) if snapshot is not None else ""
+        return state
 
     return SafetyGate(
         sample,
@@ -161,6 +164,23 @@ def collect_codex_processes(cfg: AppConfig) -> list[ProcessInfo]:
     snapshot = collect_process_snapshot(cfg)
     return snapshot.subprocesses
 
+def sample_process_state(
+    cfg: AppConfig, detector: CodexProcessDetector
+) -> tuple[ProcessState, ProcessSnapshot | None]:
+    """One reading of "is Codex running", and what it saw.
+
+    The one place that decides what counts as running: the gate samples it,
+    and every indicator that shows the same answer has to agree with the gate.
+    A platform whose detector is not proven is ``UNKNOWN``, never ``STOPPED``.
+    """
+    if not detector.capability().supported:
+        return ProcessState.UNKNOWN, None
+    snapshot = collect_process_snapshot(cfg, detector=detector)
+    if snapshot.main_processes or snapshot.sandbox_detected or snapshot.background_processes:
+        return ProcessState.RUNNING, snapshot
+    return ProcessState.STOPPED, snapshot
+
+
 def collect_process_snapshot(cfg: AppConfig, detector: CodexProcessDetector | None = None) -> ProcessSnapshot:
     detector = detector or CodexProcessDetector(cfg.process_detection.process_names)
     main, subprocesses = detector.get_subprocess_tree(cfg.process_detection.process_names)
@@ -183,9 +203,33 @@ def _build_indexes(cfg: AppConfig, local_dir: Path, cloud_dir: Path) -> tuple[di
     path_filter = PathFilter(cfg.filters.exclude_globs)
     local_idx = scan_tree(local_dir, cfg.targets.include_roots, path_filter)
     cloud_idx = scan_tree(cloud_dir, cfg.targets.include_roots, path_filter)
-    local_idx = {rel: meta for rel, meta in local_idx.items() if not _is_semantic_owned(rel)}
-    cloud_idx = {rel: meta for rel, meta in cloud_idx.items() if not _is_semantic_owned(rel)}
+    local_idx = {rel: meta for rel, meta in local_idx.items() if _is_plain_copy_candidate(rel)}
+    cloud_idx = {rel: meta for rel, meta in cloud_idx.items() if _is_plain_copy_candidate(rel)}
     return _apply_session_mode(local_idx, cloud_idx, cfg.sync.session_mode)
+
+#: Names that hold credentials (`AI_RULES` 1). Never listed, never copied,
+#: never backed up, at any depth. `sync_candidates` and `state_backup` read the
+#: same set from here.
+SECRET_NAMES = frozenset({
+    "auth.json",
+    "cap_sid",
+    ".sandbox-secrets",
+    "credentials.json",
+    "token.json",
+})
+
+def _is_secret(relative_path: str) -> bool:
+    return any(part in SECRET_NAMES for part in relative_path.replace("\\", "/").split("/"))
+
+def _is_plain_copy_candidate(relative_path: str) -> bool:
+    """Whether plain `sync` may copy this path at all.
+
+    Semantic-owned paths have their own transfer. A secret is refused here as
+    well as in validation (CS-289): an include root that covers the whole state
+    directory, or one a secret was moved into, must still never carry a token
+    into a cloud folder.
+    """
+    return not _is_semantic_owned(relative_path) and not _is_secret(relative_path)
 
 def _is_semantic_owned(relative_path: str) -> bool:
     rel = relative_path.replace("\\", "/").strip("/")
@@ -287,6 +331,18 @@ def _plan_hash(plan: SyncPlan) -> str:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
             digest.update(b"\0")
+    # A deletion is the one action a rerun cannot undo, so the hash names it
+    # and the bytes it removes, as a copy names the bytes it writes.
+    for deletion in sorted(plan.deletions, key=lambda item: (item.side, item.relative_path)):
+        digest.update(b"delete\0")
+        digest.update(deletion.side.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(deletion.relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        with deletion.path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
     for conflict in sorted(plan.conflicts):
         digest.update(b"conflict\0")
         digest.update(conflict.encode("utf-8"))

@@ -200,6 +200,90 @@ class RepairPlanTests(unittest.TestCase):
             )
         self.assertIn("REMAP_ORPHANS_SESSIONS", plan.codes)
 
+    # --- CS-300: the cover never takes a chat from another project ---------
+
+    def _two_project_state(self, old_root, nested_root, assignments=None):
+        return json.dumps({
+            "local-projects": {
+                "p1": {"id": "p1", "name": "repo", "rootPaths": [old_root], "createdAt": 1, "updatedAt": 2},
+                "n1": {"id": "n1", "name": "nested", "rootPaths": [nested_root], "createdAt": 1, "updatedAt": 2},
+            },
+            "project-order": ["p1", "n1"],
+            "thread-project-assignments": assignments or {},
+            "app-server-project-id-by-legacy-project-id-by-host": {},
+        }).encode("utf-8")
+
+    def test_a_remap_does_not_take_a_nested_projects_chat(self) -> None:
+        """A chat the plan binds to a nested project is not re-bound to the parent."""
+        old_root, new_root, rule, catalog = self._moved_case()
+        nested = new_root / "nested"
+        (nested / ".git").mkdir(parents=True)
+        nested_chat = SessionDescriptor(
+            "thread-n", SessionState.ACTIVE, "sessions/n.jsonl", "c" * 64, 1, 1,
+            cwd=old_root + os.sep + "nested",
+        )
+        catalog = SessionCatalog(list(catalog.descriptors) + [nested_chat], {})
+        plan = build_repair_plan(
+            catalog, self._two_project_state(old_root, str(nested.resolve())),
+            source_machine="source", target_machine="target", rules=[rule], volatile=False,
+        )
+        bindings = {
+            a.project_id for a in plan.actions
+            if a.session_id == "thread-n"
+            and a.kind in {RepairActionKind.ADD_BINDING, RepairActionKind.KEEP_BINDING}
+        }
+        self.assertEqual(bindings, {"n1"}, "the nested project's chat stays where it is")
+        self.assertIn("REMAP_SESSION_BOUND_ELSEWHERE", plan.codes)
+
+    def test_a_remap_does_not_take_a_chat_assigned_to_another_project(self) -> None:
+        old_root, new_root, rule, catalog = self._moved_case()
+        nested = new_root / "nested"
+        nested.mkdir(parents=True)
+        catalog = SessionCatalog(
+            list(catalog.descriptors) + [self._older_generation(old_root)], {}
+        )
+        plan = build_repair_plan(
+            catalog,
+            self._two_project_state(
+                old_root, str(nested.resolve()),
+                {"thread-old": {"projectKind": "local", "projectId": "n1"}},
+            ),
+            source_machine="source", target_machine="target", rules=[rule], volatile=False,
+        )
+        self.assertFalse(
+            [a for a in plan.actions if a.session_id == "thread-old" and a.kind is RepairActionKind.ADD_BINDING],
+            "an explicit assignment to another project is not overwritten",
+        )
+        self.assertIn("REMAP_SESSION_BOUND_ELSEWHERE", plan.codes)
+
+    def test_conflicting_bindings_names_a_chat_bound_twice(self) -> None:
+        from codexsync.repair_plan import RepairAction, conflicting_bindings
+
+        def bind(project):
+            return RepairAction(RepairActionKind.ADD_BINDING, "h", None, project, session_id="t")
+
+        self.assertEqual(conflicting_bindings([bind("p1"), bind("p1")]), ())
+        self.assertEqual(conflicting_bindings([bind("p1"), bind("n1")]), ("t",))
+
+    # --- CS-303: a schema that cannot create projects never plans one --------
+
+    def test_no_project_is_planned_where_the_schema_cannot_create_one(self) -> None:
+        cwd = self.repo / "subdir"
+        cwd.mkdir()
+        descriptor = SessionDescriptor("thread-z", SessionState.ACTIVE, "sessions/z.jsonl", "a" * 64, 1, 1, cwd=str(cwd))
+        rule = PathMappingRule("identity", "source", "target", str(self.root), str(self.root))
+        plan = build_repair_plan(
+            SessionCatalog([descriptor], {}), _electron_state([str(self.root / "elsewhere")], assigned=None),
+            source_machine="source", target_machine="target", rules=[rule], volatile=False,
+        )
+        self.assertEqual(plan.schema_id, "electron-v2")
+        kinds = [a.kind for a in plan.actions]
+        self.assertEqual(kinds, [RepairActionKind.SKIP_NO_PROJECT], "nothing is written for it, not even a binding")
+        self.assertEqual(plan.codes, ())
+        path = self.root / "skip-plan.json"
+        save_repair_plan(plan, path)
+        self.assertEqual(load_repair_plan(path).plan_id, plan.plan_id)
+
     def test_an_unrecognised_state_is_refused_rather_than_read(self) -> None:
         _, _, rule, catalog = self._moved_case()
         state = b'{"local-projects":{},"project-order":[],"thread-project-assignments":{"t":42}}'

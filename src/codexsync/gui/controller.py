@@ -50,6 +50,11 @@ from ..app import (
     run_automation_job,
     config_diff,
     create_config,
+    create_codex_backup,
+    list_codex_backups,
+    read_home_summary,
+    recount_state,
+    remember_state_stats,
     list_config_history,
     read_config_document,
     remove_key,
@@ -99,6 +104,10 @@ from ..app import (
     BROKEN_TASK_CODES,
     FOREIGN_TASK,
     LEGACY_TASK,
+    MAX_STATE_BACKUP_INTERVAL_HOURS,
+    DEFAULT_SCHEDULER_INTERVAL_SECONDS,
+    MIN_SCHEDULER_INTERVAL_SECONDS,
+    MAX_SCHEDULER_INTERVAL_SECONDS,
 )
 from ..exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .locations import find_workspaces as find_workspace_candidates
@@ -426,10 +435,28 @@ class Controller:
         target_machine: str | None = None,
         progress: ProgressCallback | None = None,
     ) -> Outcome:
-        return run(lambda: scan_chats(
-            self._config_path, source_machine=source_machine,
-            target_machine=target_machine, progress=progress,
-        ))
+        def go():
+            directory = scan_chats(
+                self._config_path, source_machine=source_machine,
+                target_machine=target_machine, progress=progress,
+            )
+            # The Home page's counts follow every chat scan; a cache that
+            # cannot be written costs the page a number, never the scan.
+            try:
+                remember_state_stats(self._config_path, directory)
+            except Exception:  # noqa: BLE001
+                pass
+            return directory
+
+        return run(go)
+
+    def home(self) -> Outcome:
+        """Everything the Home page shows without scanning a session file."""
+        return run(lambda: read_home_summary(self._config_path))
+
+    def recount_state(self, *, progress: ProgressCallback | None = None) -> Outcome:
+        """Scan the chats now for the Home page's counts. Reads only."""
+        return run(lambda: recount_state(self._config_path, progress=progress))
 
     def mapping_hints(self, *, progress: ProgressCallback | None = None) -> Outcome:
         """Folders and machine names a `[[path_mappings]]` rule can be built from."""
@@ -457,12 +484,18 @@ class Controller:
         The stored file holds the names, not the expansion: a set that froze
         session ids would stop covering a chat started on the other machine
         tomorrow, and a standing working set is exactly for that case.
+
+        An empty set is stored without reading a single chat: there is nothing
+        to expand, and "carry everything" must not cost a full scan (CS-305).
         """
 
         def go() -> SessionScope:
-            scope = build_working_set(
-                self._config_path, projects=projects, chats=chats, progress=progress,
-            )
+            if not projects and not chats:
+                scope = SessionScope()
+            else:
+                scope = build_working_set(
+                    self._config_path, projects=projects, chats=chats, progress=progress,
+                )
             write_working_set(
                 self._config_path, scope,
                 source_machine=source_machine, target_machine=target_machine,
@@ -672,7 +705,7 @@ class Controller:
     def resume_journal(self, operation_id: str, *, dry_run: bool) -> Outcome:
         return run(lambda: resume_operation(self._config_path, operation_id, dry_run=dry_run))
 
-    def rollback_journal(self, operation_id: str, *, target: str, dry_run: bool) -> Outcome:
+    def rollback_journal(self, operation_id: str, *, target: str | None, dry_run: bool) -> Outcome:
         return run(lambda: rollback_operation(
             self._config_path, operation_id, target=target, dry_run=dry_run
         ))
@@ -765,6 +798,16 @@ class Controller:
 
     def run_automation_now(self) -> Outcome:
         return run(lambda: run_automation_job(self._config_path))
+
+    # --- copies of .codex (CS-276) ---------------------------------------------
+
+    def codex_backups(self) -> Outcome:
+        """Copies in `[state_backup] root_dir`, newest first. Names and sizes only."""
+        return run(lambda: list_codex_backups(self._config_path))
+
+    def create_codex_backup(self, *, progress: ProgressCallback | None = None) -> Outcome:
+        """One copy now. Refused while Codex is open: the window never waits for hours."""
+        return run(lambda: create_codex_backup(self._config_path, wait=False, progress=progress))
 
     # --- guardian restore and project move ------------------------------------
 

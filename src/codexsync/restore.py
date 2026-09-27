@@ -19,6 +19,7 @@ import platform
 import re
 import shutil
 import stat
+from typing import Callable
 import uuid
 import zipfile
 
@@ -40,7 +41,7 @@ from .runtime import (
     initialize_runtime_paths,
 )
 from .safety_gate import OperationKind
-from .state_locator import detect_local_state_dir
+from .state_locator import locate_local_state_dir
 from .sync_engine import SyncEngine
 
 LOG = logging.getLogger(__name__)
@@ -58,6 +59,10 @@ class RestoreResult:
 #: why the timestamp and suffix are anchored at the end instead of splitting.
 _BACKUP_NAME_RE = re.compile(r"^(?P<machine>.+)-(?P<ts>\d{8}T\d{6}Z)-(?P<suffix>[0-9a-f]{12})$")
 _MANIFEST_SUFFIX = ".manifest.json"
+#: The values a backup manifest entry may carry in ``side``.
+BACKUP_SIDES = ("local", "cloud")
+#: Where one snapshot entry goes back to: ``(side, root)``, or ``None`` to skip it.
+Destination = Callable[[str], "tuple[str, Path] | None"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +171,12 @@ def restore_from_backup(
     manual_terminate_confirmation_override: bool | None = None,
     allow_legacy_snapshot: bool = False,
 ) -> RestoreResult:
+    """Restore every file of one snapshot into ``target``, as the caller chose.
+
+    This is the explicit command, and the caller names the root: the files go
+    there whichever side they were backed up from. `recover rollback` is the
+    one that follows the side each manifest entry records (CS-293).
+    """
     cfg = load_config(config_path)
     safety_gate = _make_safety_gate(cfg)
     _require_mutation_compatible_config(cfg)
@@ -179,20 +190,48 @@ def restore_from_backup(
         allow_legacy_snapshot=allow_legacy_snapshot,
     )
     _verify_backup_snapshot(snapshot, allow_legacy_snapshot=allow_legacy_snapshot)
+
+    def destination(_rel: str) -> tuple[str, Path]:
+        return target, target_root
+
     plan, extracted_snapshot_dir = _build_restore_plan_from_snapshot(
         snapshot=snapshot,
-        target_root=target_root,
+        destination=destination,
         include_roots=cfg.targets.include_roots,
         exclude_globs=cfg.filters.exclude_globs,
         temp_root=cfg.paths.temp_dir,
     )
+    execute_restore_plan(cfg, safety_gate, plan, extracted_snapshot_dir, dry_run=dry_run)
+    return RestoreResult(
+        snapshot_name=snapshot.name,
+        target=target,
+        restored_files=plan.action_count,
+    )
 
+
+def execute_restore_plan(
+    cfg: AppConfig,
+    safety_gate,
+    plan: SyncPlan,
+    extracted_snapshot_dir: Path | None,
+    *,
+    dry_run: bool,
+) -> None:
+    """Run a restore plan through the mutation envelope, then drop its staging.
+
+    Shared by `restore` and `recover rollback`, so a rollback is exactly as
+    careful as a restore: operation lock, journal, backup of what is replaced,
+    the process re-checked before each replace. The lock is the local state
+    root's even for a cloud-side write -- the key every family takes, since a
+    sync writes both sides under it (CS-304).
+    """
     mgr = BackupManager(
         backup_root=cfg.paths.backup_dir,
         machine_id=cfg.identity.machine_id or platform.node(),
         retention_days=cfg.backup.retention_days,
         max_backups=cfg.backup.max_backups,
         compression=cfg.backup.compression,
+        journal_root=cfg.paths.temp_dir,
     )
     recovery_required = False
     try:
@@ -201,7 +240,7 @@ def restore_from_backup(
         else:
             with OperationLock(
                 cfg.paths.temp_dir,
-                state_root=target_root,
+                state_root=locate_local_state_dir(cfg),
                 machine_id=cfg.identity.machine_id or platform.node(),
                 family="restore",
             ):
@@ -246,15 +285,10 @@ def restore_from_backup(
         if extracted_snapshot_dir is not None and not recovery_required:
             shutil.rmtree(extracted_snapshot_dir, ignore_errors=True)
 
-    return RestoreResult(
-        snapshot_name=snapshot.name,
-        target=target,
-        restored_files=plan.action_count,
-    )
 
 def _resolve_restore_target(cfg: AppConfig, target: str) -> Path:
     if target == "local":
-        return detect_local_state_dir(cfg.paths.local_state_dir)
+        return locate_local_state_dir(cfg)
     if target == "cloud":
         return cfg.paths.cloud_root_dir
     raise ConfigError(f"Unsupported restore target: {target}")
@@ -313,6 +347,20 @@ def _read_backup_manifest_entries(snapshot: Path) -> dict[str, tuple[str, int]]:
     snapshot the listing calls ``committed`` is exactly one whose manifest
     restore would accept; only the payload hash comparison is left to restore.
     """
+    return {rel: (sha, size) for rel, (sha, size, _side) in _parse_backup_manifest(snapshot).items()}
+
+
+def read_backup_manifest_sides(snapshot: Path) -> dict[str, str | None]:
+    """Which side (``local``/``cloud``) each entry was backed up from.
+
+    ``None`` for an entry written before the side was recorded (CS-293): such
+    an entry could have come from either root, and nothing in the snapshot
+    says which.
+    """
+    return {rel: side for rel, (_sha, _size, side) in _parse_backup_manifest(snapshot).items()}
+
+
+def _parse_backup_manifest(snapshot: Path) -> dict[str, tuple[str, int, str | None]]:
     manifest_path = _backup_manifest_path(snapshot)
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -324,13 +372,14 @@ def _read_backup_manifest_entries(snapshot: Path) -> dict[str, tuple[str, int]]:
         raise ConfigError("Backup snapshot manifest is uncommitted")
     if raw.get("snapshot") != snapshot.name or not isinstance(raw.get("entries"), list):
         raise ConfigError("Backup snapshot manifest does not match the selected snapshot")
-    entries: dict[str, tuple[str, int]] = {}
+    entries: dict[str, tuple[str, int, str | None]] = {}
     for item in raw["entries"]:
         if not isinstance(item, dict):
             raise ConfigError("Backup snapshot manifest entry is invalid")
         rel = item.get("relative_path")
         sha = item.get("sha256")
         size = item.get("size")
+        side = item.get("side")
         if (
             not isinstance(rel, str)
             or rel in entries
@@ -338,9 +387,10 @@ def _read_backup_manifest_entries(snapshot: Path) -> dict[str, tuple[str, int]]:
             or len(sha) != 64
             or not isinstance(size, int)
             or size < 0
+            or side not in (None, *BACKUP_SIDES)
         ):
             raise ConfigError("Backup snapshot manifest entry is invalid")
-        entries[rel] = (sha, size)
+        entries[rel] = (sha, size, side)
     return entries
 
 def _snapshot_hash_inventory(snapshot: Path) -> dict[str, tuple[str, int]]:
@@ -369,17 +419,23 @@ def _snapshot_hash_inventory(snapshot: Path) -> dict[str, tuple[str, int]]:
 
 def _build_restore_plan_from_snapshot(
     snapshot: Path,
-    target_root: Path,
+    destination: Destination,
     include_roots: list[str],
     exclude_globs: list[str],
     temp_root: Path,
 ) -> tuple[SyncPlan, Path | None]:
+    """Plan putting each snapshot entry back where ``destination`` says.
+
+    ``destination(relative_path)`` returns the side and root for that entry,
+    or ``None`` to leave it out. The side decides the plan list (`to_local` or
+    `to_cloud`), which is what the restore's own backup then records.
+    """
     if snapshot.is_dir():
-        return _build_restore_plan(snapshot, target_root, include_roots, exclude_globs), None
+        return _build_restore_plan(snapshot, destination, include_roots, exclude_globs), None
     if snapshot.is_file() and snapshot.suffix.lower() == ".zip":
         return _build_restore_plan_from_zip_snapshot(
             snapshot_zip=snapshot,
-            target_root=target_root,
+            destination=destination,
             include_roots=include_roots,
             exclude_globs=exclude_globs,
             temp_root=temp_root,
@@ -388,7 +444,7 @@ def _build_restore_plan_from_snapshot(
 
 def _build_restore_plan_from_zip_snapshot(
     snapshot_zip: Path,
-    target_root: Path,
+    destination: Destination,
     include_roots: list[str],
     exclude_globs: list[str],
     temp_root: Path,
@@ -398,7 +454,7 @@ def _build_restore_plan_from_zip_snapshot(
     staging_dir = temp_root / f".codexsync-restore-{uuid.uuid4().hex}"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
-    actions: list[CopyAction] = []
+    plan = SyncPlan()
     seen_entries: set[str] = set()
     with zipfile.ZipFile(snapshot_zip, mode="r") as zf:
         for entry in zf.infolist():
@@ -414,23 +470,27 @@ def _build_restore_plan_from_zip_snapshot(
                 continue
             if path_filter.is_excluded(rel):
                 continue
+            where = destination(rel)
+            if where is None:
+                continue
+            side, target_root = where
             staged = staging_dir / f"{uuid.uuid4().hex}.bin"
             with zf.open(entry, "r") as src, staged.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
             dst_path = target_root / Path(rel.replace("/", os.sep))
             _require_within(dst_path, target_root, "restore target")
-            actions.append(CopyAction(src=staged, dst=dst_path, relative_path=rel))
-    return SyncPlan(to_local=actions, to_cloud=[]), staging_dir
+            _plan_list(plan, side).append(CopyAction(src=staged, dst=dst_path, relative_path=rel))
+    return plan, staging_dir
 
 def _build_restore_plan(
     snapshot_dir: Path,
-    target_root: Path,
+    destination: Destination,
     include_roots: list[str],
     exclude_globs: list[str],
 ) -> SyncPlan:
     path_filter = PathFilter(exclude_globs)
     allowed_roots = [root.strip("/\\") for root in include_roots if root.strip("/\\")]
-    actions: list[CopyAction] = []
+    plan = SyncPlan()
 
     snapshot_root = snapshot_dir.resolve()
     for source in snapshot_dir.rglob("*"):
@@ -446,11 +506,23 @@ def _build_restore_plan(
             continue
         if path_filter.is_excluded(rel):
             continue
+        where = destination(rel)
+        if where is None:
+            continue
+        side, target_root = where
         dst = target_root / Path(rel.replace("/", os.sep))
         _require_within(dst, target_root, "restore target")
-        actions.append(CopyAction(src=source, dst=dst, relative_path=rel))
+        _plan_list(plan, side).append(CopyAction(src=source, dst=dst, relative_path=rel))
 
-    return SyncPlan(to_local=actions, to_cloud=[])
+    return plan
+
+
+def _plan_list(plan: SyncPlan, side: str) -> list[CopyAction]:
+    if side == "local":
+        return plan.to_local
+    if side == "cloud":
+        return plan.to_cloud
+    raise ConfigError(f"Unsupported restore side: {side}")
 
 def _safe_zip_relative(entry: zipfile.ZipInfo) -> str:
     raw = entry.filename.replace("\\", "/")

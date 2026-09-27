@@ -28,7 +28,7 @@
 > CI, but an end-to-end handoff on real macOS machines has not been validated.
 
 <p align="center">
-  <a href="docs/en/GUI.md"><img src="docs/screenshots/en/01-overview.png" width="85%" alt="The CodexSync window: overview"></a>
+  <a href="docs/en/GUI.md"><img src="docs/screenshots/en/02-overview.png" width="85%" alt="The CodexSync window: overview"></a>
 </p>
 
 ## What it does

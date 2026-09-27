@@ -22,7 +22,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | 命令 | 冷？ | 作用 | 详情 |
 |---|---|---|---|
 | `init-config` | — | 用内置模板写出一个 `config.toml` | [见下](#上手) |
-| `validate` | 否 | 加载并检查配置，仅此而已 | [见下](#上手) |
+| `validate` | 否 | 加载并检查配置，包括会写入的命令是否接受它 | [见下](#上手) |
 | `config check` | 否 | 报告本版本会对 `config.toml` 做哪些改动 | [配置](CONFIGURATION.md#升级来自旧版本的配置) |
 | `config upgrade` | 否 | 以一次确认过的写入应用这些改动 | [配置](CONFIGURATION.md#升级来自旧版本的配置) |
 | `doctor` / `preflight` | 否 | 环境诊断；两者相同且无副作用 | [见下](#上手) |
@@ -36,7 +36,9 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `guardian accept` | 否 | 在确实发生减少之后，把当前状态作为新基准 | [守护](GUARDIAN.md#接受新的基准) |
 | `guardian scheduler` | 否 | 已废弃：请用 `automation apply` | [配置](CONFIGURATION.md#自动化) |
 | `automation status` / `run` | 否 | 显示计划任务，或立即执行它的安全作业 | [配置](CONFIGURATION.md#自动化) |
-| `automation apply` / `remove` | 否 | 让系统任务与 `[scheduler]` 一致，或删除它 | [配置](CONFIGURATION.md#自动化) |
+| `automation apply` / `remove` | 否 | 让系统任务与 `[scheduler]` 和 `[state_backup]` 一致，或删除它们 | [配置](CONFIGURATION.md#自动化) |
+| `state-backup create` | **是** | 制作一个经过校验的 `.codex` 副本；`--wait` 会等待 Codex 关闭 | [配置](CONFIGURATION.md#codex-副本) |
+| `state-backup list` | 否 | 列出 `[state_backup] root_dir` 中的副本 | [配置](CONFIGURATION.md#codex-副本) |
 | `sessions scan` | 否 | 对两侧的每个会话分支分类 | [会话](SESSIONS.md) |
 | `sessions resolve` | 否 | 为一处分叉记录一个决定 | [会话](SESSIONS.md#分叉) |
 | `sessions apply` | **是** | 按一份已确认的计划整体传输分支 | [会话](SESSIONS.md#执行计划) |
@@ -95,8 +97,8 @@ codexsync -c config.toml doctor
 
 `doctor`（以及与它相同的 `preflight`）只读取、不创建任何东西 —— 尤其不会在 `.codex`
 里面创建。它会检查配置和各个目录、Codex 是否在运行、全局状态的结构与最近一张可还原的
-快照、会话文件与会话索引、SQLite 线程目录、一次同步被允许做什么、同步清单，以及遗留的
-临时文件。
+快照、会话文件与会话索引、SQLite 线程目录、一次同步被允许做什么、同步清单、遗留的
+临时文件，以及是否有未完成的写操作仍在阻止一切写入（在 `recover` 关闭它之前算作失败）。
 
 ## 退出码
 
@@ -111,11 +113,20 @@ codexsync -c config.toml doctor
 
 `doctor`/`preflight` 在全部检查通过、或只有警告时返回 `0`，至少有一项失败时返回 `5`。
 
+格式错误的命令行 —— 未知的选项、缺少的参数 —— 返回 `4`，而不是参数解析器通常返回的
+`2`：在这里 `2` 表示冲突。带命令运行的 `codexsync-gui.exe` 也一样；
+`codexsync-gui.exe --version` 和 `--help` 同样由命令行来回答。
+
+`guardian restore` 和 `chats move` 不带 `--confirm` 时只是预览；它们的 `--dry-run`
+只有与 `--confirm` 一起使用时，才会检查真正写入时会检查的一切，包括进程检查。
+
 ## 进程安全
 
 - codexSync 从不启动或结束 Codex。旧的「结束进程」开关会以退出码 `4` 被拒绝，对会写入
   的命令而言 `allow_terminate_if_running = true` 同样如此。
 - 一次写入要求 Codex 已经连续停止两秒，另加提交前和提交过程中的直接检查。
+- 同一个 Codex 文件夹同一时间只能有一条会写入的命令在工作，不论它是哪一种；第二条会以
+  退出码 `5` 停下。
 - `RUNNING` 和 `UNKNOWN` 都会阻止写入。在 macOS 和 Linux 上，写入一直被阻止，直到
   进程检测器在真实机器上得到验证（见
   [还没有被验证的部分](README.md#还没有被验证的部分)）。

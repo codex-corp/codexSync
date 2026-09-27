@@ -53,6 +53,12 @@ class _Case(unittest.TestCase):
     def manifest(self, **entries: ManifestEntry) -> SyncManifest:
         return SyncManifest(data_version=1, files=dict(entries))
 
+    def _kept(self, side: Path) -> dict[str, FileMeta]:
+        """A file both sides still agree on. The side a deletion came from is
+        never empty in these tests: a side holding nothing at all is a
+        missing folder, not a deletion, and is a conflict (CS-324)."""
+        return self.index(side, ("keep.txt", 500, 4))
+
     @staticmethod
     def entry(local: tuple[int, int] | None, cloud: tuple[int, int] | None) -> ManifestEntry:
         return ManifestEntry(
@@ -169,9 +175,10 @@ class DeletePolicyTests(_Case):
 
     def test_a_proven_deletion_removes_the_surviving_copy(self) -> None:
         previous = self.manifest(**{"a.txt": self.entry((1_000, 1), (1_000, 1))})
-        local = self.index(self.local, ("a.txt", 1_000, 1))
+        local = {**self.index(self.local, ("a.txt", 1_000, 1)), **self._kept(self.local)}
         plan = build_sync_plan(
-            local, {}, self.local, self.cloud, previous_manifest=previous, delete_policy="propagate",
+            local, self._kept(self.cloud), self.local, self.cloud,
+            previous_manifest=previous, delete_policy="propagate",
         )
         self.assertEqual([item.relative_path for item in plan.deletions], ["a.txt"])
         self.assertEqual(plan.deletions[0].side, "local")
@@ -206,9 +213,9 @@ class DeletePolicyTests(_Case):
 
     def test_a_deletion_towards_the_skipped_side_is_dropped_by_the_direction(self) -> None:
         previous = self.manifest(**{"a.txt": self.entry((1_000, 1), (1_000, 1))})
-        local = self.index(self.local, ("a.txt", 1_000, 1))
+        local = {**self.index(self.local, ("a.txt", 1_000, 1)), **self._kept(self.local)}
         plan = build_sync_plan(
-            local, {}, self.local, self.cloud, previous_manifest=previous,
+            local, self._kept(self.cloud), self.local, self.cloud, previous_manifest=previous,
             delete_policy="propagate", direction="to_cloud",
         )
         self.assertEqual(plan.deletions, [], "to_cloud may not remove a local file")
@@ -231,9 +238,10 @@ class DeleteExecutionTests(_Case):
         """A file both sides held and the other side deleted, unchanged here."""
         size = path.stat().st_size
         previous = self.manifest(**{"a.txt": self.entry((1_000, size), (1_000, size))})
-        local = {"a.txt": meta(path, 1_000, size)}
+        local = {"a.txt": meta(path, 1_000, size), **self._kept(self.local)}
         plan = build_sync_plan(
-            local, {}, self.local, self.cloud, previous_manifest=previous, delete_policy="propagate",
+            local, self._kept(self.cloud), self.local, self.cloud,
+            previous_manifest=previous, delete_policy="propagate",
         )
         assert [item.relative_path for item in plan.deletions] == ["a.txt"], plan
         return plan

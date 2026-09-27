@@ -37,6 +37,10 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
 - `include_roots` are paths relative to `.codex` (and to the mirror). The
   template lists `sessions` and `session_index.jsonl`, but `sync` skips them (see
   below); `sessions` carries them.
+- `include_roots` must name something inside `.codex`: an empty list, `""` or
+  `"."` is refused with exit 4, because it would mean the whole directory. A
+  config without the key loads (for Guardian alone, say), and `sync` refuses to
+  run with it.
 - In `exclude_globs`, `**` means any number of path segments, `*` and `?` match
   within one segment, and a pattern without `/` matches that file name at any
   depth.
@@ -49,8 +53,9 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
   removes those skills itself. With `delete_policy = "never"` a file it deleted
   would be restored from the mirror on the next run, and deleted again — the
   tree is left to the runtime entirely.
-- The Settings screen never offers a credential file (`auth.json` and the like)
-  for inclusion.
+- A credential file (`auth.json`, `cap_sid`, `.sandbox-secrets` and the like)
+  is never copied, at any depth under any root, and the Settings screen never
+  offers one for inclusion.
 - `sync.session_mode = "last_date_only"` is refused: it can discard branches.
 
 ## How files are compared
@@ -58,6 +63,16 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
 The previous run's result is kept in a manifest (`state.manifest_file`) that
 records both sides. That is how a change on one side is told apart from a
 conflict.
+
+The manifest sits in the shared workspace, so it keeps one record **per
+machine** (`identity.machine_id`, or the host name without one): what this
+machine saw on both sides when it last synced. A single shared record made a
+machine take the other machine's last sync for its own, see its older file as a
+local edit and copy it over the newer one in the cloud. A manifest written by an
+earlier version has no per-machine records; its entries are not attributed to
+anyone, so the first run after the upgrade behaves like a first sync — the newer
+file wins, a file on one side only is copied, nothing is deleted — and records
+this machine's own baseline.
 
 `sync.compare`:
 
@@ -83,6 +98,12 @@ A file changed on both sides since the last run is a conflict. `conflict.policy`
 | `prefer_cloud` | Take the cloud version |
 | `prefer_local` | Take the local version |
 | `prefer_newer_mtime` | Take the side with the newer modification time |
+
+A conflict the policy does not decide — equal times with
+`equal_mtime_action = "manual_abort"`, a disputed deletion — stops the run
+before any write with exit code `2` under every policy, and so do two paths that
+differ only in letter case (`Rules/a.md` and `rules/a.md`), which a
+case-insensitive volume stores as one file.
 
 ## Direction
 
@@ -116,6 +137,10 @@ With `propagate`:
 - a dry run deletes nothing;
 - the first run after switching it on deletes nothing, because there is no proof
   yet;
+- a deletion out of an include root that holds no file at all on the side it
+  went missing from is a conflict, not a deletion: an empty or missing folder
+  there (a cloud folder being downloaded again, a disconnected drive) must not
+  empty the same folder on the other side;
 - semantic-owned paths are never deleted this way.
 
 ## History

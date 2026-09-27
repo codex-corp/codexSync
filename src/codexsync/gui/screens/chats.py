@@ -320,9 +320,20 @@ class ChatsScreen(Screen):
             self.summary.setText("")
             self.target.clear()
             self.autofix.clear()
+            self._tree_drawn = None
+            self._targets_drawn = None
         else:
-            self._fill_tree()
-            self._fill_targets()
+            # A scan redraws the page on every progress report while the old
+            # directory is still the one on screen; rebuilding every chat of
+            # it ten times a second is what made the window stutter.
+            if not self._drawn_from(getattr(self, "_tree_drawn", None), self._tree_key()):
+                self._fill_tree()
+            if getattr(self, "_targets_drawn", None) is not outcome:
+                self._fill_targets()
+                self._targets_drawn = outcome
+        self.autofix_button.setEnabled(
+            self.autofix.isEnabled() and bool(self.autofix.currentData()) and not model.move_busy
+        )
         self._render_move()
         self._selection_changed()
 
@@ -349,10 +360,20 @@ class ChatsScreen(Screen):
         if not groups:
             self.autofix.addItem(self.t("chats.autofix.none"), "")
 
+    def _tree_key(self) -> tuple:
+        """Everything the tree is drawn from; the directory is compared by identity."""
+        model = self.model
+        return (model.directory, model.project, model.text, model.association, model.sub_threads)
+
+    @staticmethod
+    def _drawn_from(drawn: tuple | None, key: tuple) -> bool:
+        return drawn is not None and drawn[0] is key[0] and drawn[1:] == key[1:]
+
     def _fill_tree(self) -> None:
         outcome = self.model.directory
         if outcome is None or not outcome.ok:
             return
+        self._tree_drawn = self._tree_key()
         directory = outcome.value
         palette = self.palette_
         needle = self.model.text.casefold().strip()

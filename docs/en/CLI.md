@@ -23,7 +23,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | Command | Cold? | What it does | Details |
 |---|---|---|---|
 | `init-config` | — | Write a `config.toml` from the bundled template | [below](#getting-started) |
-| `validate` | no | Load and check the configuration, nothing else | [below](#getting-started) |
+| `validate` | no | Load and check the configuration, including that commands that write accept it | [below](#getting-started) |
 | `config check` | no | Report what this version would change in `config.toml` | [Configuration](CONFIGURATION.md#upgrading-a-config-from-an-earlier-version) |
 | `config upgrade` | no | Apply that, in one confirmed write | [Configuration](CONFIGURATION.md#upgrading-a-config-from-an-earlier-version) |
 | `doctor` / `preflight` | no | Environment diagnostics; identical and side-effect free | [below](#getting-started) |
@@ -37,7 +37,9 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `guardian accept` | no | Take the current state as the new baseline after a real drop | [Guardian](GUARDIAN.md#accepting-a-new-baseline) |
 | `guardian scheduler` | no | Deprecated: use `automation apply` | [Configuration](CONFIGURATION.md#automation) |
 | `automation status` / `run` | no | Show the scheduled task, or run its safe job now | [Configuration](CONFIGURATION.md#automation) |
-| `automation apply` / `remove` | no | Make the OS task match `[scheduler]`, or remove it | [Configuration](CONFIGURATION.md#automation) |
+| `automation apply` / `remove` | no | Make the OS tasks match `[scheduler]` and `[state_backup]`, or remove them | [Configuration](CONFIGURATION.md#automation) |
+| `state-backup create` | **yes** | Take one verified copy of `.codex`; `--wait` waits for Codex to close | [Configuration](CONFIGURATION.md#copies-of-codex) |
+| `state-backup list` | no | List the copies in `[state_backup] root_dir` | [Configuration](CONFIGURATION.md#copies-of-codex) |
 | `sessions scan` | no | Classify every session branch on both sides | [Sessions](SESSIONS.md) |
 | `sessions resolve` | no | Record one decision about a divergence | [Sessions](SESSIONS.md#divergences) |
 | `sessions apply` | **yes** | Transfer whole branches under one confirmed plan | [Sessions](SESSIONS.md#applying-a-plan) |
@@ -106,7 +108,8 @@ codexsync -c config.toml doctor
 inside `.codex`. It checks the configuration and directories, whether Codex is
 running, the global-state schema and the latest restorable snapshot, session
 files and the session index, the SQLite thread catalogue, what a sync is allowed
-to do, the sync manifest and leftover temporary files.
+to do, the sync manifest, leftover temporary files, and whether an unfinished
+mutation still blocks every write (a failure until `recover` closes it).
 
 ## Exit codes
 
@@ -122,6 +125,15 @@ to do, the sync manifest and leftover temporary files.
 `doctor`/`preflight` return `0` when every check passed or there are only
 warnings, and `5` when at least one check failed.
 
+A malformed command line — an unknown option, a missing argument — is `4`, not
+the `2` an argument parser usually returns: `2` means a conflict here. The same
+holds for `codexsync-gui.exe` given a command; `codexsync-gui.exe --version` and
+`--help` are answered by the command line too.
+
+`guardian restore` and `chats move` are previews without `--confirm`; their
+`--dry-run` checks everything a real write would, including the process gate,
+only together with `--confirm`.
+
 ## Process safety
 
 - codexSync never starts or terminates Codex. The old termination flags are
@@ -129,6 +141,8 @@ warnings, and `5` when at least one check failed.
   commands that write.
 - A write requires Codex to have been stopped continuously for two seconds, plus
   direct checks before and during the commit.
+- Only one writing command works on one Codex folder at a time, whatever its
+  kind; a second one stops with exit code `5`.
 - `RUNNING` and `UNKNOWN` both block a write. On macOS and Linux writes stay
   blocked until the process detector has been proven on a live machine (see
   [what is not proven yet](README.md#what-is-not-proven-yet)).

@@ -12,7 +12,10 @@ def scan_tree(base_dir: Path, include_roots: list[str], path_filter: PathFilter)
     Returns file index by normalized relative path.
     """
     result: dict[str, FileMeta] = {}
-    roots = include_roots if include_roots else ["."]
+    # No roots means nothing is synchronised -- never "the whole directory",
+    # which is where `auth.json` lives (CS-289). Validation refuses an empty
+    # list; this is the second line.
+    roots = include_roots
     base_resolved = base_dir.resolve()
 
     for root in roots:
@@ -23,6 +26,10 @@ def scan_tree(base_dir: Path, include_roots: list[str], path_filter: PathFilter)
         root_path = (base_resolved / root_candidate).resolve()
         if not _is_subpath(root_path, base_resolved):
             raise ConfigError(f"targets.include_roots points outside state dir: {root}")
+        if root_path == base_resolved:
+            raise ConfigError(
+                f"targets.include_roots must name a folder or file inside the state dir, not the dir itself: {root!r}"
+            )
 
         if not root_path.exists():
             continue

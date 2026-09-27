@@ -20,9 +20,12 @@ from pathlib import Path
 from .config import load_config
 from .exceptions import FailSafeError
 from .models import AppConfig
+from .process_detector import CodexProcessDetector
 from .system_scheduler import (
     LOGIN_SYNC_MODE,
     LOGIN_SYNC_SLOT,
+    STATE_BACKUP_MODE,
+    STATE_BACKUP_SLOT,
     JobDefinition,
     ScheduledJob,
     SchedulerError,
@@ -55,6 +58,18 @@ class AutomationView:
     login_argv: tuple[str, ...] = ()
     login_status: SchedulerStatus | None = None
     login_status_error: str | None = None
+    #: `[state_backup]` and its own task (CS-276, `D-017`).
+    backup_root: Path | None = None
+    backup_at_login: bool = False
+    backup_interval_hours: int = 0
+    backup_keep: int = 5
+    backup_argv: tuple[str, ...] = ()
+    backup_status: SchedulerStatus | None = None
+    backup_status_error: str | None = None
+
+    @property
+    def backup_scheduled(self) -> bool:
+        return self.backup_root is not None and (self.backup_at_login or self.backup_interval_hours > 0)
 
 
 def _log_dir(cfg: AppConfig, config_path: Path) -> Path:
@@ -77,19 +92,33 @@ def _scheduler(
     return system_scheduler(protected_roots=tuple(roots), slot=slot)
 
 
-def _require_pair(scheduler: SystemScheduler | None, login_scheduler: SystemScheduler | None) -> None:
-    """Both adapters injected, or neither.
+def _require_all(*adapters: SystemScheduler | None) -> None:
+    """Every adapter injected, or none.
 
     Injecting one used to leave the other to the real OS, so a test that faked
     the periodic task ran the real ``schtasks`` for the sign-in one.
     """
-    if (scheduler is None) != (login_scheduler is None):
-        raise ValueError("inject both scheduler and login_scheduler, or neither")
+    if len({adapter is None for adapter in adapters}) > 1:
+        raise ValueError("inject scheduler, login_scheduler and backup_scheduler together, or none of them")
 
 
 def login_sync_definition(cfg: AppConfig, config_path: Path) -> JobDefinition:
     """The sign-in sync: once, after `startup_delay_seconds`, never repeated."""
     job = ScheduledJob(LOGIN_SYNC_MODE, None, True, cfg.scheduler.startup_delay_seconds, 0)
+    return JobDefinition(job, tuple(job_command()), config_path.resolve(), _log_dir(cfg, config_path))
+
+
+def state_backup_definition(cfg: AppConfig, config_path: Path) -> JobDefinition:
+    """The copy of `.codex`: at sign-in and/or every N hours, as `[state_backup]` says.
+
+    Built even when neither is switched on (as a sign-in job), so the command
+    a person would get can be shown before they switch it on.
+    """
+    settings = cfg.state_backup
+    hours = settings.interval_hours
+    interval = hours * 3600 if isinstance(hours, int) and hours > 0 else None
+    at_login = bool(settings.at_login) or interval is None
+    job = ScheduledJob(STATE_BACKUP_MODE, interval, at_login, cfg.scheduler.startup_delay_seconds if at_login else 0, 0)
     return JobDefinition(job, tuple(job_command()), config_path.resolve(), _log_dir(cfg, config_path))
 
 
@@ -110,9 +139,10 @@ def automation_status(
     *,
     scheduler: SystemScheduler | None = None,
     login_scheduler: SystemScheduler | None = None,
+    backup_scheduler: SystemScheduler | None = None,
 ) -> AutomationView:
     """What `[scheduler]` asks for, and what the OS actually has. Reads only."""
-    _require_pair(scheduler, login_scheduler)
+    _require_all(scheduler, login_scheduler, backup_scheduler)
     cfg = load_config(config_path)
     login_definition = login_sync_definition(cfg, config_path)
     login_status: SchedulerStatus | None = None
@@ -123,6 +153,15 @@ def automation_status(
         )
     except SchedulerError as exc:
         login_error = str(exc)
+    backup_definition = state_backup_definition(cfg, config_path)
+    backup_status: SchedulerStatus | None = None
+    backup_error: str | None = None
+    try:
+        backup_status = _scheduler(cfg, backup_scheduler, slot=STATE_BACKUP_SLOT).status(
+            expected=backup_definition
+        )
+    except SchedulerError as exc:
+        backup_error = str(exc)
     definition = job_definition(cfg, config_path)
     adapter = _scheduler(cfg, scheduler)
     status: SchedulerStatus | None = None
@@ -148,7 +187,40 @@ def automation_status(
         login_argv=tuple(login_definition.argv()),
         login_status=login_status,
         login_status_error=login_error,
+        backup_root=cfg.state_backup.root_dir,
+        backup_at_login=bool(cfg.state_backup.at_login),
+        backup_interval_hours=int(cfg.state_backup.interval_hours),
+        backup_keep=int(cfg.state_backup.keep),
+        backup_argv=tuple(backup_definition.argv()),
+        backup_status=backup_status,
+        backup_status_error=backup_error,
     )
+
+
+def _codex_detectable(cfg: AppConfig) -> bool:
+    return CodexProcessDetector(cfg.process_detection.process_names).capability().supported
+
+
+def _require_detectable_codex(cfg: AppConfig) -> None:
+    """Refuse a task that could never do its job on this platform.
+
+    The copy of `.codex` and the sign-in sync both need Codex proven closed;
+    where the process detector is not proven, the gate reads UNKNOWN and every
+    run exits 5. Installing such a task would look like protection and be
+    none. Checked before any task is touched, so a refusal changes nothing.
+    """
+    wanted = [
+        name for name, on in (
+            ("state_backup (at_login / interval_hours)", cfg.state_backup.scheduled),
+            ("scheduler.sync_at_login", cfg.scheduler.sync_at_login),
+        ) if on
+    ]
+    if wanted and not _codex_detectable(cfg):
+        raise FailSafeError(
+            "The scheduled tasks were not updated: " + " and ".join(wanted)
+            + " need Codex proven closed, and this platform's process detector is not proven, "
+            "so every run would stop without doing anything. Switch them off to apply the rest."
+        )
 
 
 def apply_automation(
@@ -156,13 +228,26 @@ def apply_automation(
     *,
     scheduler: SystemScheduler | None = None,
     login_scheduler: SystemScheduler | None = None,
+    backup_scheduler: SystemScheduler | None = None,
 ) -> AutomationView:
-    """Make both OS tasks match `[scheduler]`: install what is on, remove what is off."""
-    _require_pair(scheduler, login_scheduler)
+    """Make every OS task match the config: install what is on, remove what is off."""
+    _require_all(scheduler, login_scheduler, backup_scheduler)
     cfg = load_config(config_path)
+    _require_detectable_codex(cfg)
     adapter = _scheduler(cfg, scheduler)
     login_adapter = _scheduler(cfg, login_scheduler, slot=LOGIN_SYNC_SLOT)
+    backup_adapter = _scheduler(cfg, backup_scheduler, slot=STATE_BACKUP_SLOT)
     try:
+        if cfg.state_backup.scheduled:
+            definition = state_backup_definition(cfg, config_path)
+            backup_adapter.install(
+                definition.job,
+                command=definition.command,
+                config_path=definition.config_path,
+                log_dir=definition.log_dir,
+            )
+        else:
+            backup_adapter.remove()
         if cfg.scheduler.sync_at_login:
             definition = login_sync_definition(cfg, config_path)
             login_adapter.install(
@@ -187,7 +272,9 @@ def apply_automation(
         # The OS refused or the definition cannot be expressed; either way the
         # task was not changed by this call, which is what fail-safe means here.
         raise FailSafeError(f"The scheduled task was not updated: {exc}") from exc
-    return automation_status(config_path, scheduler=adapter, login_scheduler=login_adapter)
+    return automation_status(
+        config_path, scheduler=adapter, login_scheduler=login_adapter, backup_scheduler=backup_adapter
+    )
 
 
 def remove_automation(
@@ -195,14 +282,16 @@ def remove_automation(
     *,
     scheduler: SystemScheduler | None = None,
     login_scheduler: SystemScheduler | None = None,
+    backup_scheduler: SystemScheduler | None = None,
 ) -> bool:
-    """Remove both tasks; ``True`` if either existed."""
-    _require_pair(scheduler, login_scheduler)
+    """Remove every task; ``True`` if any existed."""
+    _require_all(scheduler, login_scheduler, backup_scheduler)
     cfg = load_config(config_path)
     try:
         periodic = _scheduler(cfg, scheduler).remove()
         login = _scheduler(cfg, login_scheduler, slot=LOGIN_SYNC_SLOT).remove()
-        return periodic or login
+        backup = _scheduler(cfg, backup_scheduler, slot=STATE_BACKUP_SLOT).remove()
+        return periodic or login or backup
     except SchedulerError as exc:
         raise FailSafeError(f"The scheduled task was not removed: {exc}") from exc
 
@@ -214,5 +303,6 @@ __all__ = [
     "automation_status",
     "job_definition",
     "login_sync_definition",
+    "state_backup_definition",
     "remove_automation",
 ]

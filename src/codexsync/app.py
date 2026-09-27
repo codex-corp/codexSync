@@ -54,7 +54,16 @@ from .exceptions import ConfigError, ConflictError, FailSafeError
 from .backup import BackupManager
 from .manifest import build_manifest, load_manifest, save_manifest
 from .mutation_journal import JournalState, JournalStore, MutationJournal
-from .models import AppConfig, CopyAction, FileMeta, SyncPlan
+from .models import (
+    DEFAULT_SCHEDULER_INTERVAL_SECONDS,
+    MAX_SCHEDULER_INTERVAL_SECONDS,
+    MAX_STATE_BACKUP_INTERVAL_HOURS,
+    MIN_SCHEDULER_INTERVAL_SECONDS,
+    AppConfig,
+    CopyAction,
+    FileMeta,
+    SyncPlan,
+)
 from .operation_lock import OperationLock
 from .path_mapping import mapping_digest
 from .guardian_runner import GuardianRunner
@@ -78,7 +87,7 @@ from .preflight import (
     print_preflight_report,
     run_preflight,
 )
-from .repair_plan import RepairActionKind, RepairPlan, build_repair_plan, load_repair_plan, save_repair_plan
+from .repair_plan import RepairActionKind, RepairPlan, build_repair_plan, conflicting_bindings, load_repair_plan, save_repair_plan
 from .restore import BackupSnapshotInfo, RestoreResult, list_backup_snapshots, restore_from_backup
 from .recovery import (
     JournalInfo,
@@ -112,8 +121,17 @@ from .runtime import (
     collect_codex_processes,
     collect_process_snapshot,
     initialize_runtime_paths,
+    sync_machine_id,
 )
 from .safety_gate import OperationKind, ProcessState, SafetyGate
+from .state_backup import StateBackupEntry, StateBackupResult, create_state_backup, list_state_backups
+from .home_stats import (
+    HomeSummary,
+    StateStats,
+    read_home_summary,
+    state_stats_from_directory,
+    write_state_stats,
+)
 from .session_scope import (
     SessionScope,
     build_session_scope,
@@ -133,6 +151,7 @@ from .semantic_transfer import (
     load_transfer_plan,
     local_folder_exists,
     mirror_codec_for,
+    plan_scope,
     save_transfer_plan,
 )
 from .semantic_store import SemanticStore
@@ -145,8 +164,8 @@ from .session_index import (
     IndexParseResult,
     parse_session_index,
 )
-from .stable_reader import SourceMissingError, StableReader
-from .state_locator import detect_local_state_dir, resolve_state_dirs
+from .stable_reader import SourceMissingError, SourceTooLargeError, SourceUnstableError, StableReader
+from .state_locator import locate_local_state_dir, locate_state_dirs
 from .sync_engine import SyncEngine
 from .version import PRODUCER_VERSION, __version__
 
@@ -155,6 +174,10 @@ LOG = logging.getLogger(__name__)
 __all__ = [
     "__version__",
     "BROKEN_TASK_CODES",
+    "MAX_STATE_BACKUP_INTERVAL_HOURS",
+    "DEFAULT_SCHEDULER_INTERVAL_SECONDS",
+    "MIN_SCHEDULER_INTERVAL_SECONDS",
+    "MAX_SCHEDULER_INTERVAL_SECONDS",
     "FOREIGN_TASK",
     "LEGACY_TASK",
     "ConfigFinding",
@@ -188,6 +211,15 @@ __all__ = [
     "save_project_move_plan",
     "scan_project_move",
     "AutomationRun",
+    "StateBackupEntry",
+    "StateBackupResult",
+    "create_codex_backup",
+    "HomeSummary",
+    "StateStats",
+    "read_home_summary",
+    "recount_state",
+    "remember_state_stats",
+    "list_codex_backups",
     "AutomationView",
     "apply_automation",
     "automation_status",
@@ -339,10 +371,15 @@ def build_context(
         volatile = plan_decision.process_state is not ProcessState.STOPPED
     if enforce_safety:
         initialize_runtime_paths(cfg)
-    local_dir, cloud_dir = resolve_state_dirs(cfg.paths.local_state_dir, cfg.paths.cloud_root_dir)
+    local_dir, cloud_dir = locate_state_dirs(cfg)
+    if not cfg.targets.include_roots:
+        # Never "everything": that is where the credentials live (CS-289).
+        raise ConfigError("targets.include_roots is not set: there is nothing to synchronise")
 
     local_idx, cloud_idx = _build_indexes(cfg, local_dir, cloud_dir)
-    manifest = load_manifest(cfg.state.manifest_file, cfg.state.data_version)
+    manifest = load_manifest(
+        cfg.state.manifest_file, cfg.state.data_version, machine_id=sync_machine_id(cfg)
+    )
     plan = build_sync_plan(
         local_index=local_idx,
         cloud_index=cloud_idx,
@@ -355,6 +392,7 @@ def build_context(
         equal_mtime_action=cfg.sync.equal_mtime_action,
         direction=cfg.sync.direction,
         delete_policy=cfg.sync.delete_policy,
+        include_roots=cfg.targets.include_roots,
     )
     return AppContext(
         config=cfg,
@@ -372,7 +410,7 @@ def build_guardian_runner(config_path: Path) -> GuardianRunner:
     """Construct a Guardian that reads only the global JSON state file."""
     cfg = load_config(config_path)
     machine_id = require_guardian_identity(cfg)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     source = local_dir / ".codex-global-state.json"
     store = GuardianStore(
         cfg.guardian.root_dir,
@@ -394,7 +432,7 @@ def scan_repair_projects(
     progress: ProgressCallback | None = None,
 ) -> RepairPlan:
     cfg = load_config(config_path)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     decision = _make_safety_gate(cfg).check(OperationKind.REPAIR_SCAN)
     volatile = decision.process_state is not ProcessState.STOPPED
     observation = _observe_global_state(cfg, config_path, local_dir)
@@ -446,11 +484,13 @@ def apply_repair_projects(
     unsupported = {RepairActionKind.AMBIGUOUS_PROJECT, RepairActionKind.UNSUPPORTED_BACKEND}
     if any(action.kind in unsupported for action in plan.actions):
         raise ConflictError("Repair plan contains unresolved or unsupported actions")
+    if conflicting_bindings(plan.actions):
+        raise FailSafeError("Repair plan binds one chat to more than one project")
     gate = _make_safety_gate(cfg)
     gate.require(OperationKind.REPAIR_APPLY)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     source = local_dir / ".codex-global-state.json"
-    original = source.read_bytes()
+    original = _read_live_state(source, config_path)
     if hashlib.sha256(original).hexdigest() != plan.global_state_sha256:
         raise FailSafeError("Global state changed after the repair scan")
     try:
@@ -558,19 +598,28 @@ def commit_global_state(
     machine = cfg.identity.machine_id or platform.node()
     with OperationLock(cfg.paths.temp_dir, state_root=state_root, machine_id=machine, family=family):
         journals = JournalStore(cfg.paths.temp_dir)
-        manager = BackupManager(cfg.paths.backup_dir, machine, compression="none")
+        manager = BackupManager(
+            cfg.paths.backup_dir, machine, compression="none", journal_root=cfg.paths.temp_dir
+        )
         journal = journals.begin(
             family, plan_id, action_count, backup_snapshot=manager.snapshot_name
         )
-        backup_path = manager.backup_file(source, source.name)
-        if backup_path is None or _hash_file(backup_path) != hashlib.sha256(original).hexdigest():
-            error = FailSafeError("Verified full backup could not be created")
-            journals.transition(journal, JournalState.FAILED, failure=error)
-            raise error
-        manager.finalize()
-        journal = journals.transition(journal, JournalState.BACKED_UP)
-        gate.require(operation, final=True)
-        journal = journals.transition(journal, JournalState.COMMITTING)
+        original_sha256 = hashlib.sha256(original).hexdigest()
+        # Everything up to COMMITTING replaces nothing, so any failure here --
+        # a backup that cannot be written, Codex starting -- closes the journal
+        # as FAILED. Left open it blocked every later mutation until a manual
+        # `recover resume`, for a write that never happened (CS-291).
+        try:
+            backup_path = manager.backup_file(source, source.name, side="local")
+            if backup_path is None or _hash_file(backup_path) != original_sha256:
+                raise FailSafeError("Verified full backup could not be created")
+            manager.finalize()
+            journal = journals.transition(journal, JournalState.BACKED_UP)
+            gate.require(operation, final=True)
+            journal = journals.transition(journal, JournalState.COMMITTING)
+        except Exception as exc:
+            _close_journal_after_failure(journals, journal, exc)
+            raise
         replaced = False
         temp = source.with_name(f".{source.name}.{uuid.uuid4().hex}.tmp")
         try:
@@ -579,6 +628,14 @@ def commit_global_state(
                 handle.flush()
                 os.fsync(handle.fileno())
             gate.require(operation, final=True)
+            # The candidate was computed from `original`. A file that moved
+            # since -- Codex, or another writer this lock did not cover --
+            # would be overwritten with an edit of a state that no longer
+            # exists (CS-304), so it is re-read right before the replace.
+            if _hash_file(source) != original_sha256:
+                raise FailSafeError(
+                    f"{source.name} changed after it was read; nothing was replaced. Run the command again."
+                )
             os.replace(temp, source)
             replaced = True
             post = validate_global_state_references(source.read_bytes())
@@ -589,6 +646,12 @@ def commit_global_state(
             return action_count
         except Exception as exc:
             temp.unlink(missing_ok=True)
+            if not replaced:
+                # The commit phase was entered and nothing was replaced. It is
+                # closed through RECOVERY_REQUIRED -- COMMITTING has no edge to
+                # FAILED -- so the trail keeps saying the phase was entered.
+                _close_journal_after_failure(journals, journal, exc)
+                raise
             journal = journals.transition(journal, JournalState.RECOVERY_REQUIRED, failure=exc)
             if replaced:
                 try:
@@ -602,6 +665,20 @@ def commit_global_state(
                 except Exception:
                     LOG.exception("%s rollback could not be completed safely", family)
             raise
+
+
+def _close_journal_after_failure(journals: JournalStore, journal: MutationJournal, exc: BaseException) -> None:
+    """Close a journal whose operation replaced nothing, keeping the original error.
+
+    A journal that cannot be written here stays open, which blocks later
+    mutations -- the safe side; it is logged instead of masking ``exc``.
+    """
+    try:
+        if journal.state is JournalState.COMMITTING:
+            journal = journals.transition(journal, JournalState.RECOVERY_REQUIRED, failure=exc)
+        journals.transition(journal, JournalState.FAILED, failure=exc)
+    except Exception:
+        LOG.exception("Could not close the mutation journal %s", journal.operation_id)
 
 
 def _plans_dir(cfg: AppConfig) -> Path:
@@ -648,7 +725,7 @@ def build_working_set(
     directory = scan_chats(config_path, progress=progress)
     return build_session_scope(
         directory, projects=projects, chats=chats,
-        placements=read_thread_placements(detect_local_state_dir(cfg.paths.local_state_dir)),
+        placements=read_thread_placements(locate_local_state_dir(cfg)),
     )
 
 
@@ -684,7 +761,7 @@ def scan_chats(
     because a chat open right now is still being written.
     """
     cfg = load_config(config_path)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     decision = _make_safety_gate(cfg).check(OperationKind.SESSION_SCAN)
     observation = _observe_global_state(cfg, config_path, local_dir)
     return build_chat_directory(
@@ -718,7 +795,7 @@ def move_chats(
     on later without a plan file existing anywhere.
     """
     cfg = load_config(config_path)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     gate = _make_safety_gate(cfg)
     applying = confirm_plan is not None
     if applying:
@@ -729,7 +806,7 @@ def move_chats(
         volatile = gate.check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
 
     source = local_dir / ".codex-global-state.json"
-    original = source.read_bytes()
+    original = _read_live_state(source, config_path)
     directory = build_chat_directory(
         local_dir, original,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
@@ -826,7 +903,7 @@ def scan_session_transfer(
     hashes -- exactly as it did before working sets existed.
     """
     cfg = load_config(config_path)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     cloud_dir = cfg.paths.cloud_root_dir
     decision = _make_safety_gate(cfg).check(OperationKind.SESSION_SCAN)
     volatile = decision.process_state is not ProcessState.STOPPED
@@ -879,7 +956,7 @@ def audit_session_index(config_path: Path) -> dict:
     say what an index contains and where the two disagree, and nothing more.
     """
     cfg = load_config(config_path)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     local = parse_session_index(local_dir / SESSION_INDEX_FILE)
     cloud = parse_session_index(cfg.paths.cloud_root_dir / SESSION_INDEX_FILE)
 
@@ -1037,7 +1114,10 @@ def _write_branch_resolutions(output_path: Path, resolutions: list[BranchResolut
 #: Blocked actions that stop an apply outright, because each one names a
 #: decision the user still has to make. Every other blocked action is a
 #: standing limit of what codexSync may write, so it is reported and the rest
-#: of the plan still applies.
+#: of the plan still applies. `BLOCKED_INVALID_BRANCH` is one of those: a copy
+#: that cannot be read, or one id in two files, is left untouched on both
+#: sides, and no recorded choice could fix it -- stopping every apply for it
+#: would leave the mirror unwritable while one file on either side is broken.
 _UNRESOLVED_TRANSFER_BLOCKS = frozenset({
     TransferAction.BLOCKED_CONFLICT,
     TransferAction.BLOCKED_TARGET_COLLISION,
@@ -1083,7 +1163,7 @@ def apply_session_transfer(
     gate = _make_safety_gate(cfg)
     gate.require(OperationKind.SESSION_APPLY)
     initialize_runtime_paths(cfg)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     cloud_dir = cfg.paths.cloud_root_dir
 
     fresh, local_by_hash, remote_by_hash = _rebuild_transfer_plan(
@@ -1145,6 +1225,7 @@ def apply_session_transfer(
         retention_days=cfg.backup.retention_days,
         max_backups=cfg.backup.max_backups,
         compression=cfg.backup.compression,
+        journal_root=cfg.paths.temp_dir,
     )
     if dry_run:
         SyncEngine(
@@ -1232,7 +1313,7 @@ def _rebuild_transfer_plan(
         # The working set the plan was confirmed under, never the one stored
         # now: the id covers the scope, so a set edited after the scan applies
         # to the next scan, not to a confirmation already given.
-        scope=plan.scope or None,
+        scope=plan_scope(plan),
         # The rules as they are now: the codes they produce are in the id, so a
         # rule edited after the scan is a changed plan, not a silent one.
         path_rules=cfg.path_mappings,
@@ -1345,6 +1426,9 @@ def _bundle_resolved_conflicts(
             cloud_dir / Path(*remote.relative_path.split("/")),
             session_id=local.session_id or remote.session_id or "",
             common_records=0,
+            # The pair the resolution was pinned to, so the bundle holds -- and
+            # is named by -- exactly the conflict that was decided.
+            expected=(item.local_sha256, item.remote_sha256),
         )
         LOG.info("conflict bundle written for plan %s: %s", plan.plan_id, bundle.name)
         bundles.append(bundle)
@@ -1482,7 +1566,11 @@ def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> No
     `origin` -- ``window``, ``cli`` or ``unattended`` -- is written into the
     journal so a history can say who started the run; it decides nothing.
     """
-    if ctx.plan.conflicts and ctx.config.conflict.policy == "manual_abort":
+    # Any conflict left in the plan stops the run, whatever `conflict.policy`
+    # says: a policy that resolves one never leaves it here, and what is left
+    # (equal times under `manual_abort`, a disputed or mass deletion, a case
+    # collision) would otherwise be recorded as agreement (CS-295).
+    if ctx.plan.conflicts:
         details = ", ".join(ctx.plan.conflicts)
         if not ctx.config.conflict.report_conflicts:
             details = "hidden by configuration"
@@ -1494,6 +1582,7 @@ def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> No
         retention_days=ctx.config.backup.retention_days,
         max_backups=ctx.config.backup.max_backups,
         compression=ctx.config.backup.compression,
+        journal_root=ctx.config.paths.temp_dir,
     )
     if dry_run:
         SyncEngine(
@@ -1536,13 +1625,17 @@ def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> No
             pre_commit_check=pre_commit,
             before_replace_check=lambda: ctx.safety_gate.require(OperationKind.SYNC, final=True),
             after_backup=after_backup,
+            before_stage_check=lambda: ctx.safety_gate.require(OperationKind.SYNC),
         )
         try:
             engine.execute(ctx.plan, dry_run=False)
             local_idx, cloud_idx = _build_indexes(ctx.config, ctx.local_dir, ctx.cloud_dir)
             # The paths this direction did not act on keep their old entry:
             # recording them now would say the two sides agreed (`D-012`).
-            previous = load_manifest(ctx.config.state.manifest_file, ctx.config.state.data_version)
+            previous = load_manifest(
+                ctx.config.state.manifest_file, ctx.config.state.data_version,
+                machine_id=sync_machine_id(ctx.config),
+            )
             manifest = build_manifest(
                 local_idx, cloud_idx, ctx.config.state.data_version,
                 previous=previous, skipped=ctx.plan.skipped,
@@ -1563,12 +1656,24 @@ def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> No
             raise
 
 
-def validate_config_only(config_path: Path) -> None:
-    try:
-        cfg = load_config(config_path)
-        _ = resolve_state_dirs(cfg.paths.local_state_dir, cfg.paths.cloud_root_dir)
-    except ConfigError:
-        raise
+def validate_config_only(config_path: Path) -> tuple[str, ...]:
+    """Refuse a config that loads but that every mutating command would refuse.
+
+    `validate` used to stop at loading, so it said "valid" for a 0.1 config
+    on which sync, restore, repair and recover all exit 4 (CS-325). What is
+    valid but limits a command is returned as notes: a config without
+    `targets.include_roots` serves Guardian and diagnostics, and `sync`
+    refuses it (CS-319).
+    """
+    cfg = load_config(config_path)
+    _ = locate_state_dirs(cfg)
+    _require_mutation_compatible_config(cfg)
+    notes: list[str] = []
+    if not cfg.targets.listed:
+        notes.append(
+            "targets.include_roots is not set: sync has nothing to synchronise and refuses to run"
+        )
+    return tuple(notes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1604,6 +1709,39 @@ def run_automation_job(config_path: Path) -> AutomationRun:
         run_sync(ctx, dry_run=True)
         return AutomationRun(mode, "DRY_RUN_FINISHED", actions=ctx.plan.action_count)
     raise ConfigError(f"scheduler.mode {mode!r} cannot be run")
+
+
+def create_codex_backup(
+    config_path: Path,
+    *,
+    wait: bool = False,
+    progress: ProgressCallback | None = None,
+) -> StateBackupResult:
+    """Take one copy of the valuable part of `.codex` (`[state_backup]`, CS-276).
+
+    Gated like a mutation because a copy of files that are being written is a
+    copy of no moment; with ``wait`` it waits for Codex to close instead of
+    refusing, which is what the scheduled task passes.
+    """
+    cfg = load_config(config_path)
+    return create_state_backup(cfg, gate=_make_safety_gate(cfg), wait=wait, progress=progress)
+
+
+def remember_state_stats(config_path: Path, directory: ChatDirectory) -> StateStats:
+    """Keep a chat scan's counts for the Home page (CS-275). Best effort, counts only."""
+    stats = state_stats_from_directory(directory)
+    write_state_stats(config_path, stats)
+    return stats
+
+
+def recount_state(config_path: Path, *, progress: ProgressCallback | None = None) -> StateStats:
+    """Scan the chats now and keep the counts. Reads `.codex` only."""
+    return remember_state_stats(config_path, scan_chats(config_path, progress=progress))
+
+
+def list_codex_backups(config_path: Path) -> list[StateBackupEntry]:
+    """Copies in `[state_backup] root_dir`, newest first. Reads names and sizes."""
+    return list_state_backups(load_config(config_path))
 
 
 def accept_guardian_baseline(
@@ -1643,6 +1781,31 @@ def _observe_global_state(cfg: AppConfig, config_path: Path, local_dir: Path):
             f"paths.local_state_dir in {config_path} points at {local_dir}. "
             "Either Codex is not installed for this user, or this is not the config you meant."
         ) from exc
+    except SourceTooLargeError as exc:
+        raise ConfigError(
+            f"{source} is larger than guardian.max_state_bytes ({cfg.guardian.max_state_bytes}) in {config_path}"
+        ) from exc
+    except SourceUnstableError as exc:
+        raise FailSafeError(f"{source} kept changing while it was read; close Codex or try again") from exc
+
+
+def _read_live_state(source: Path, config_path: Path) -> bytes:
+    """The live global state for a mutation, with its failures mapped to exit codes.
+
+    A bare `read_bytes` let a missing or locked file escape as a traceback and
+    exit 1 (CS-325). Missing is a configuration answer -- which config named
+    this path is the useful half of the message -- and anything else is a
+    fail-safe stop, never a guess.
+    """
+    try:
+        return source.read_bytes()
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            f"No Codex global state at {source}, the folder {config_path} names. "
+            "Either Codex is not installed for this user, or this is not the config you meant."
+        ) from exc
+    except OSError as exc:
+        raise FailSafeError(f"Cannot read {source}: {exc}") from exc
 
 
 def _read_state_for_preview(cfg: AppConfig, source: Path) -> bytes | None:
@@ -1673,7 +1836,7 @@ def restore_global_state(
     """
     cfg = load_config(config_path)
     machine = require_guardian_identity(cfg)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     source = local_dir / ".codex-global-state.json"
     root = cfg.guardian.root_dir
     if confirm_plan is None:
@@ -1742,7 +1905,7 @@ def scan_project_move(config_path: Path, *, project_id: str, new_root: Path) -> 
     apply refuses it.
     """
     cfg = load_config(config_path)
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     volatile = _make_safety_gate(cfg).check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
     source = local_dir / ".codex-global-state.json"
     state = _read_state_for_preview(cfg, source)
@@ -1796,7 +1959,7 @@ def apply_project_move_plan(
         plan = load_project_move_plan(Path(plan_path))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"Cannot read project move plan {plan_path}: {exc}") from exc
-    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local_dir = locate_local_state_dir(cfg)
     source = local_dir / ".codex-global-state.json"
     gate = _make_safety_gate(cfg)
 

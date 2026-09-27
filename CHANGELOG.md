@@ -10,6 +10,31 @@ version through `codexsync.__version__`, which is read from installed package
 metadata.
 
 ### Added
+- **Copies of `.codex`** (`[state_backup]`, `codexsync state-backup create|list`,
+  `D-017`). A zip copy of the valuable part of the Codex state directory —
+  sessions, the archive, the global state, the SQLite catalogues, `config.toml`,
+  rules, skills, memories — into a folder you choose; secrets, caches, logs and
+  temporary files are never copied. A copy is taken only while Codex is closed:
+  a third user-level task takes one after signing in and/or every N hours and
+  *waits* for Codex to close, while a manual copy refuses (exit 3). Every copy is
+  verified before it counts, and the oldest of this machine's copies beyond
+  `keep` is removed only after that. Off until a folder is chosen.
+- **Automation page.** Every task the operating system runs for CodexSync — the
+  safe periodic job, the sync after sign-in and the copies of `.codex` — on one
+  page with its settings, its OS state, the copies that exist and *Make a copy
+  now*. The *Automation* tab left *Settings*; the shared form logic moved into
+  one class (`ConfigFormScreen`), so both pages save the same careful way.
+- **Home page**, first in the menu and beside *Overview*: the last sync and the
+  runs, failures and files moved in 30 days, chats and projects, copies of
+  `.codex`, backups, the snapshot guardian and which tasks are on, each tile
+  linking to its page. Chat counts need the full scan, so they come from a
+  cache every chat scan refreshes (`%LOCALAPPDATA%\CodexSync\cache`, counts
+  only) and are shown with the time they were taken.
+- **Both exes describe themselves.** Version, product name, description in
+  English, Russian and Chinese, and `© 2026 Fyodor Malkov — <project page>` in
+  the file's *Details*, generated at build time from the package metadata and
+  the window's language files (`scripts/exe_version_info.py`);
+  `scripts/check_exe_version.py` reads it back from a built exe.
 - **Sync history.** Every real sync's journal now records how many files went
   each way, who started it (`window`, `cli`, `unattended`), when it ended and,
   for a failure, the kind of error (never its message). `codexsync history`
@@ -123,7 +148,8 @@ metadata.
   template. `load_config` now reports a TOML syntax error as a configuration
   error (exit 4) instead of a traceback, and accepts a UTF-8 byte-order mark.
 - `[scheduler]` is a real, validated section (`enabled`, `mode` =
-  `guardian_snapshot|preflight|sync_dry_run`, `interval_seconds` ≥ 60,
+  `guardian_snapshot|preflight|sync_dry_run`, `interval_seconds` from 300
+  (5 minutes) to 31 days, 1800 by default,
   `run_at_login`, `startup_delay_seconds`, `jitter_seconds`); legacy keys are
   ignored. `system_scheduler` installs, inspects and removes the user-level OS
   task (Task Scheduler, launchd, `systemd --user`) that runs that job, and can
@@ -303,6 +329,20 @@ metadata.
   The project entry's own `rootPaths` key now settles it in both directions.
 
 ### Changed
+- **The scheduled job runs every 30 minutes by default, and at most every 5.**
+  A Guardian snapshot every minute was the default, which is far more often
+  than the state is worth recording and meant a process sample and a possible
+  write into a cloud-synced folder each time. `interval_seconds` defaults to
+  1800 and must be at least 300; a shorter value is refused at load with a
+  pointer to `config upgrade`, which raises it to 300. The Automation page
+  edits the period in minutes.
+- **A true/false setting must be written without quotes.** `"false"` used to
+  be read as true, so `backup_before_overwrite = "false"` or
+  `require_codex_stopped = "false"` meant the opposite of what it said. Any
+  value that is not a TOML boolean is now a configuration error naming the key.
+  `validate` also notes a config without `targets.include_roots` (fine for
+  Guardian, refused by `sync`).
+- Documentation examples no longer use real project names or chat ids.
 - Documentation is split by audience. `README.md` and `README.ru.md` are short
   entry points with the same structure; the user documentation is a set of pages
   in `docs/en/` with a Russian twin in `docs/ru/` and a Chinese one in
@@ -340,6 +380,89 @@ metadata.
 
 ### Fixed
 
+- **A handoff between two machines could copy the older file over the newer
+  one.** The sync manifest in the shared workspace held one baseline for all
+  machines, so machine B took machine A's last sync for its own, read its own
+  untouched, older file as a local edit and copied it into the cloud over A's
+  version. The manifest now keeps a baseline per machine (CS-288); one written by
+  an earlier version is attributed to no machine, so the first run after the
+  upgrade plans a first sync and deletes nothing.
+- **An empty `include_roots` synchronised the whole `.codex`, `auth.json`
+  included.** A written empty list, `""` or `"."` is now refused (exit 4), a
+  config without the key synchronises nothing, and a credential file is never
+  indexed for `sync` at any depth (CS-289).
+- **Pruning backups could delete things that were not its backups.** It removed
+  any old folder in `backup_dir` — the mirror's `sessions/` when the two
+  overlapped — and other machines' snapshots, including one an interrupted
+  operation still needed. It now removes only this machine's own snapshots,
+  never one an unfinished journal names, and nothing when the journals cannot
+  be read; `cloud_root_dir`, `backup_dir`, `temp_dir` and
+  `state.manifest_file` may no longer overlap (CS-290, CS-294).
+- **A conflict was recorded as agreement under a non-default policy.** Equal
+  times under `equal_mtime_action = "manual_abort"` and disputed deletions
+  under `propagate` left the run at exit 0; any conflict now stops it with
+  exit 2 (CS-295).
+- **`propagate` could empty a folder that was only missing on the other side,**
+  and two paths differing only in letter case were copied onto one file. Both
+  are conflicts now (CS-324).
+- **Config values of the wrong kind.** A word where a number belongs exited 1
+  with a traceback, a string where a list belongs was split into letters
+  (`exclude_globs = "**/*.lock"`), `logging.level = "LOUD"` silently meant INFO,
+  and negative counts passed; each is now a `ConfigError` naming the key
+  (CS-319). A path written as `\\?\C:\...` resolved to a rootless path and
+  passed every overlap check; the prefix is removed first (CS-320).
+- **Logging.** `logging.file` may not be inside `.codex`; with two codexSync
+  processes, rotation zipped a file the other one still held on every line it
+  wrote; and the commands a scheduled task runs (`guardian`, `preflight`,
+  `state-backup`) did not write to the log file at all (CS-318).
+- **Smaller sync fixes** (CS-325): the sync plan id now covers deletions; a
+  malformed manifest is a `ConfigError` instead of a traceback, and it is
+  flushed to disk before it replaces the old one; the sweep of `*.tmp` in
+  `temp_dir` spares files younger than an hour; the gate is checked again
+  right before anything is staged; `config upgrade` clamps a migrated interval
+  to the 31-day maximum; and on Linux a sign-in timer is enabled but no longer
+  started at install, which could run the sign-in sync or copy right away.
+- **Overview showed no last sync and no open journal when the environment check
+  failed.** The journals and the task state were read only after a successful
+  check, which is exactly when they matter least; they are now read either way.
+- **Recovery and the mutation envelope (review of 2026-09-27).**
+  - A chat move, repair, project move or Guardian restore stopped before its
+    replace (Codex starting, a backup that could not be written) left its
+    journal open, so every later write exited 5 until `recover resume`. It now
+    closes as failed; one stopped inside the commit phase with nothing replaced
+    closes through `RECOVERY_REQUIRED`, keeping the trail (CS-291).
+  - `recover rollback` closed the journal and only then found that the restore
+    refused the global state and session files. Rollback is now planned and
+    proven first; the global state goes back through the same careful write as
+    the original, a session transfer is refused up front (use `resume`), and the
+    Recovery screen and `list_journals` say why (CS-292).
+  - A backup now records the side (`local`/`cloud`) of every file, and a
+    rollback puts each file back where it came from. Rolling back a
+    bidirectional sync into one `--target` wrote the cloud side's old files into
+    `.codex`. `--target` is now optional and, given, must be the only side the
+    backup holds; an older sync backup without sides is refused (CS-293).
+  - A backup the journal names but that is gone is refused instead of reported
+    as "nothing to roll back" (CS-294).
+  - A leftover journal temp file made every later transition of that journal
+    fail, including the ones `recover` makes; each write now uses its own name
+    (CS-296).
+  - One lock per Codex folder for every kind of write: `chats move` and
+    `repair-projects apply`, or a sync and a restore, could run together. The
+    global state is also re-read right before it is replaced and left alone if
+    it moved (CS-304).
+- **Exit codes and input.** A malformed command line exits 4, not argparse's 2,
+  which means a conflict here — also through `codexsync-gui.exe`, which now
+  answers `--version`/`--help` as the command line (CS-315). `doctor` fails on an
+  unfinished mutation journal instead of passing while every write exits 5
+  (CS-316), and no longer crashes when `temp_dir` is a file. A `--scope-file`
+  that is missing or not a saved set is exit 4 instead of silently dropping the
+  working set (CS-317). `validate` refuses a config every writing command
+  refuses; `sessions scan` exits 2 only for a conflict or target collision, not
+  for sessions the apply skips; `chats list --limit` refuses a negative number;
+  a missing or unstable global state in `chats move`/`repair-projects
+  apply`/scans is exit 4 or 5 instead of a traceback; the `-c` help names the
+  real search order; `--dry-run` help of `guardian restore`/`chats move` says it
+  checks the gate only with `--confirm` (CS-325).
 - **Settings: a config from an earlier version squeezed the tabs to nothing.**
   The upgrade card sat above the tabs in a page that did not scroll, so the
   form of every tab was about 50 px tall, and in a small window the card's
@@ -554,6 +677,33 @@ metadata.
   bindings were compared the same way, a bare id against an object, so a
   correct binding was always reported as missing. This is the same class of
   fault as the Guardian one below, found by running against a real state file.
+- `repair-projects` on the desktop build no longer plans a project it cannot
+  create. A chat whose folder belongs to no project produced `ADD_PROJECT`,
+  which the apply refuses on that schema, so one such chat (5 on the machine
+  checked) made every plan unappliable, including an unrelated remap; the window
+  also showed those rows as "ok". It is now `SKIP_NO_PROJECT`: nothing is
+  written for it, not even a binding, and the rest of the plan applies.
+- A `repair-projects` remap no longer takes chats from another project. Pinning
+  the chats under the old root bound every one of them to the remapped project,
+  including a nested project's chats and chats explicitly assigned elsewhere, and
+  the later binding silently won. Those are now left alone and reported as
+  `REMAP_SESSION_BOUND_ELSEWHERE`, and the apply refuses any plan that binds one
+  chat to two projects.
+- A copy of `.codex` no longer follows Windows junctions. `is_symlink()` does
+  not see a junction, so the copy walked `skills` into folders outside `.codex`
+  (18 foreign files of 453 on the machine checked); and a folder that could not
+  be listed was skipped silently, now it fails the copy. Junctions, symlinks and
+  cloud placeholders are told apart by one rule shared by the copy, `project-move`
+  and the session catalogue.
+- The session catalogue no longer skips a cloud placeholder. It treated every
+  reparse point as a link, so a session file a cloud client had marked was not
+  scanned at all; only a reparse point that names another location is skipped
+  now, as in `project-move`.
+- `project-move` can be resumed from any crash point. The resume marker is
+  written before the verified copy takes the target name (a crash right after the
+  rename left the copy unrecognised, `TARGET_EXISTS` for good), and the staging
+  marker stays until after the rename (a crash just before it left a staging
+  folder the next run refused as `STAGING_OCCUPIED`).
 - Guardian recognises the state written by the Electron Codex desktop build.
   Its bindings carry `projectKind`/`projectId` and its app-server ids live in a
   per-host map, neither of which the only existing adapter accepted, so a real
@@ -579,6 +729,68 @@ metadata.
   indexer, antivirus) aborted the whole mutation with `WinError 5`/`32`. The
   commit now retries a transient lock with bounded backoff, re-proving process
   safety before each attempt (see `D-011`).
+- **Sessions: a copy that could not be read counted as no copy at all.** A
+  mirror branch with a broken tail, or one session id in two files, was left out
+  of the plan, so the session looked one-sided and the other side's branch was
+  copied over it unread — no comparison, no conflict bundle. Such a session is
+  now `BLOCKED_INVALID_BRANCH`: nothing is written for it on either side, the
+  rest of the plan still applies, and a duplicate id is a plan code
+  (`LOCAL_DUPLICATE_SESSION_ID`) instead of something only `doctor` mentioned. A
+  copy of a session the destination lacks is refused when a file already sits
+  where it would land (`DESTINATION_OCCUPIED`), and a comparison that fails is
+  no longer a conflict you could "resolve" against empty hashes.
+- **Sessions: a resolved conflict could give the mirror a second file.** Keeping
+  a branch archived here over one still active in the mirror wrote it under the
+  local path, leaving two files for one id, which drops the session from every
+  later plan. A branch the mirror holds is now rewritten where it is
+  (`MIRROR_PATH_KEPT`). `FORMAT_MIGRATION` is set only on a divergence, so
+  `--format-migrations` no longer decides a missing base.
+- **Sessions: a working set that covered no session could never be applied.**
+  The plan was built narrowed and rebuilt unnarrowed, so its id never matched.
+  Such a set now writes nothing into `.codex` (`WORKING_SET_MATCHES_NOTHING`)
+  and applies.
+- **Sessions: conflict bundles.** A bundle is now named by the conflict id you
+  resolved (bundles written under the old name are still found), both copies
+  are re-hashed before it is committed, and a directory left by an interrupted
+  attempt is rebuilt instead of being taken for a bundle.
+- **Sessions: smaller read faults.** A damaged `.jsonl.gz` in the mirror ended
+  the scan with a traceback (`zlib.error`) instead of marking that branch
+  unreadable; a file removed while the catalogue was being built did the same.
+  Two records that differ only by a repeated key (`{"k":1,"k":2}` and
+  `{"k":2}`) were treated as the same record. A thread catalogue that could not
+  be opened, or sat in a folder whose name holds `#` or `%`, read as *no*
+  catalogue (`ABSENT`) rather than an unreadable one (`INDETERMINATE`).
+- **Guardian: review fixes.**
+  - A snapshot a cloud client held for a moment was skipped when the next
+    generation was numbered, so its number was issued twice and every later
+    commit refused on duplicate generations, for good. The number now comes from
+    every manifest and marker in the store plus the pointer; one that cannot be
+    read stops the commit until it can. Stores the old numbering already broke
+    recover on the next commit.
+  - A new snapshot names `latest-good` — the state it was judged against — as its
+    predecessor, not the highest generation, so retention keeps the baseline an
+    accepted snapshot really overrode. Generations may now skip numbers.
+  - A state equal to an *older* snapshot (the file after `guardian restore`) was
+    answered `UNCHANGED` and left `latest-good` on a state the file no longer had;
+    it is now a new generation.
+  - A latest-good pointer naming another machine was trusted, and one with a
+    non-text machine id crashed every Guardian command; both are now rebuilt.
+  - `guardian restore` refuses a live file whose project state is in a shape no
+    adapter recognises (`LIVE_SCHEMA_UNKNOWN`): that is a newer Codex, not damage.
+  - A U+FEFF character inside a JSON string (a project name) was taken for a
+    byte-order mark and quarantined every state; only a mark at offset 0 counts.
+  - A schema change froze `latest-good` for good, since the watcher cannot
+    compare two schemas. `guardian accept` now accepts a state in another known
+    schema that passes every check (`BASELINE_SCHEMA_CHANGED`, marked
+    `SCHEMA_CHANGE_ACCEPTED`).
+  - Quarantine kept a full copy of every rewrite of a rejected state for 30 days;
+    one drop now keeps its first and newest event, the newest counting the rest.
+  - The `COMMITTED` marker's temporary name made it the longest path in the store
+    (past 260 characters on a deep root); it is now short. Snapshot directories a
+    crash left uncommitted are swept after `staging_retention_hours`.
+  - `guardian watch` ended on the first store error (a locked file, a full disk,
+    a busy writer lock); it now logs, backs off and continues. The writer lock no
+    longer raises a raw `PermissionError` or leaks a locked handle.
 
 ## [0.1.2] - 2026-03-21
 
