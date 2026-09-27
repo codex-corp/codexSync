@@ -106,7 +106,7 @@ class AutomationStatusTests(unittest.TestCase):
     def test_a_task_that_drifted_from_the_config_points_to_apply(self) -> None:
         drifted = _view(status=SchedulerStatus(installed=True, enabled=True, definition_matches=False))
         with mock.patch("codexsync.cli.automation_status", return_value=drifted):
-            code, out, _ = _run_cli(["automation", "status"])
+            code, out, _ = _run_cli(["-c", "cfg.toml", "automation", "status"])
 
         self.assertEqual(code, 0)
         self.assertEqual(_fields(out)["definition_matches"], "no")
@@ -115,7 +115,7 @@ class AutomationStatusTests(unittest.TestCase):
     def test_enabled_but_not_installed_points_to_apply(self) -> None:
         missing = _view(status=SchedulerStatus(installed=False, detail="Scheduled task is not installed"))
         with mock.patch("codexsync.cli.automation_status", return_value=missing):
-            code, out, _ = _run_cli(["automation", "status"])
+            code, out, _ = _run_cli(["-c", "cfg.toml", "automation", "status"])
 
         self.assertEqual(code, 0)
         self.assertEqual(_fields(out)["installed"], "no")
@@ -124,7 +124,7 @@ class AutomationStatusTests(unittest.TestCase):
     def test_a_platform_without_run_times_says_so_instead_of_never(self) -> None:
         view = _view(reports_run_times=False, ignored=())
         with mock.patch("codexsync.cli.automation_status", return_value=view):
-            _, out, _ = _run_cli(["automation", "status"])
+            _, out, _ = _run_cli(["-c", "cfg.toml", "automation", "status"])
 
         fields = _fields(out)
         self.assertEqual(fields["ignored_settings"], "(none)")
@@ -133,7 +133,7 @@ class AutomationStatusTests(unittest.TestCase):
     def test_an_unreachable_scheduler_is_reported_not_raised(self) -> None:
         view = _view(status=None, status_error="schtasks.exe not found")
         with mock.patch("codexsync.cli.automation_status", return_value=view):
-            code, out, _ = _run_cli(["automation", "status"])
+            code, out, _ = _run_cli(["-c", "cfg.toml", "automation", "status"])
 
         self.assertEqual(code, 0)
         self.assertEqual(_fields(out)["status_error"], "schtasks.exe not found")
@@ -141,7 +141,7 @@ class AutomationStatusTests(unittest.TestCase):
     def test_a_bad_config_is_exit_four(self) -> None:
         with mock.patch("codexsync.cli.automation_status", side_effect=ConfigError("bad")):
             with self.assertLogs("codexsync.cli", level="ERROR"):
-                code, _, _ = _run_cli(["automation", "status"])
+                code, _, _ = _run_cli(["-c", "cfg.toml", "automation", "status"])
         self.assertEqual(code, 4)
 
 
@@ -158,7 +158,7 @@ class AutomationApplyRemoveTests(unittest.TestCase):
     def test_apply_with_scheduler_disabled_reports_removal(self) -> None:
         disabled = _view(enabled=False, status=SchedulerStatus(installed=False))
         with mock.patch("codexsync.cli.apply_automation", return_value=disabled):
-            code, out, _ = _run_cli(["automation", "apply"])
+            code, out, _ = _run_cli(["-c", "cfg.toml", "automation", "apply"])
 
         self.assertEqual(code, 0)
         self.assertIn("enabled = false", out)
@@ -167,7 +167,7 @@ class AutomationApplyRemoveTests(unittest.TestCase):
     def test_a_refused_apply_is_a_safe_abort(self) -> None:
         with mock.patch("codexsync.cli.apply_automation", side_effect=FailSafeError("not updated")):
             with self.assertLogs("codexsync.cli", level="ERROR"):
-                code, _, _ = _run_cli(["automation", "apply"])
+                code, _, _ = _run_cli(["-c", "cfg.toml", "automation", "apply"])
         self.assertEqual(code, 5)
 
     def test_remove_leaves_the_config_and_says_apply_would_reinstall(self) -> None:
@@ -184,7 +184,7 @@ class AutomationApplyRemoveTests(unittest.TestCase):
     def test_a_refused_remove_is_a_safe_abort(self) -> None:
         with mock.patch("codexsync.cli.remove_automation", side_effect=FailSafeError("not removed")):
             with self.assertLogs("codexsync.cli", level="ERROR"):
-                code, _, _ = _run_cli(["automation", "remove"])
+                code, _, _ = _run_cli(["-c", "cfg.toml", "automation", "remove"])
         self.assertEqual(code, 5)
 
 
@@ -215,19 +215,19 @@ class AutomationRunTests(unittest.TestCase):
 
     def test_busy_is_labelled_like_guardian_snapshot(self) -> None:
         with mock.patch("codexsync.cli.run_automation_job", return_value=AutomationRun("guardian_snapshot", "BUSY")):
-            _, out, _ = _run_cli(["automation", "run"])
+            _, out, _ = _run_cli(["-c", "cfg.toml", "automation", "run"])
         self.assertIn("Automation run: SKIPPED_ACTIVE_GUARDIAN", out)
 
     def test_actions_are_printed_for_a_dry_run(self) -> None:
         result = AutomationRun("sync_dry_run", "DRY_RUN_FINISHED", actions=7)
         with mock.patch("codexsync.cli.run_automation_job", return_value=result):
-            _, out, _ = _run_cli(["automation", "run"])
+            _, out, _ = _run_cli(["-c", "cfg.toml", "automation", "run"])
         self.assertEqual(_fields(out)["actions"], "7")
 
     def test_codex_running_during_a_dry_run_sync_is_exit_three(self) -> None:
         with mock.patch("codexsync.cli.run_automation_job", side_effect=SafetyPreconditionError("running")):
             with self.assertLogs("codexsync.cli", level="ERROR"):
-                code, _, _ = _run_cli(["automation", "run"])
+                code, _, _ = _run_cli(["-c", "cfg.toml", "automation", "run"])
         self.assertEqual(code, 3)
 
 
