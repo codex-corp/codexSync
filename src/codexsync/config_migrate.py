@@ -162,7 +162,9 @@ class ConfigFinding:
     optional: bool = False
     #: The values `detail` names, as text, so a window can say the same thing
     #: in its own language. Not part of the plan id: it restates the edits.
-    params: Mapping[str, str] = _NO_PARAMS
+    #: A factory, not a plain default: before 3.12 a mappingproxy is
+    #: unhashable, and dataclasses refuses it as a mutable default.
+    params: Mapping[str, str] = field(default_factory=lambda: _NO_PARAMS)
 
     @property
     def fixable(self) -> bool:
