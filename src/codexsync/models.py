@@ -179,6 +179,31 @@ class StateBackupConfig:
         )
 
 
+#: Longest a sign-in load waits for the cloud to deliver another machine's
+#: handoff: a day, beyond which the wait is no longer about delivery.
+MAX_HANDOFF_DELIVERY_WAIT_MINUTES = 24 * 60
+
+
+@dataclass(slots=True, frozen=True)
+class HandoffConfig:
+    """The `[handoff]` section (CS-328, `D-018`): passing work between machines.
+
+    ``root_dir`` holds one small file per machine saying what it last handed
+    off; it has to be in the folder the cloud client syncs, beside the mirror.
+    ``None`` means no handoff at all. ``enabled`` installs the background
+    watcher that loads at sign-in and hands off when Codex closes; without it
+    the same handoff is still available by hand. Values are kept as read and
+    checked by `_validate_config`, like `SchedulerConfig`.
+    """
+
+    root_dir: Path | None = None
+    enabled: bool = False
+    #: How long a load waits for another machine's handoff to arrive.
+    delivery_wait_minutes: int = 15
+    #: Say what happened with an operating-system notification.
+    notify: bool = True
+
+
 @dataclass(slots=True)
 class AppConfig:
     identity: IdentityConfig
@@ -197,6 +222,7 @@ class AppConfig:
     semantic: SemanticConfig = field(default_factory=lambda: SemanticConfig(root_dir=Path("semantic")))
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     state_backup: StateBackupConfig = field(default_factory=StateBackupConfig)
+    handoff: HandoffConfig = field(default_factory=HandoffConfig)
 
 
 @dataclass(slots=True, frozen=True)

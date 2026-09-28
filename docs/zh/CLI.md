@@ -36,9 +36,12 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `guardian accept` | 否 | 在确实发生减少之后，把当前状态作为新基准 | [守护](GUARDIAN.md#接受新的基准) |
 | `guardian scheduler` | 否 | 已废弃：请用 `automation apply` | [配置](CONFIGURATION.md#自动化) |
 | `automation status` / `run` | 否 | 显示计划任务，或立即执行它的安全作业 | [配置](CONFIGURATION.md#自动化) |
-| `automation apply` / `remove` | 否 | 让系统任务与 `[scheduler]` 和 `[state_backup]` 一致，或删除它们 | [配置](CONFIGURATION.md#自动化) |
+| `automation apply` / `remove` | 否 | 让系统任务与 `[scheduler]`、`[state_backup]` 和 `[handoff]` 一致，或删除它们 | [配置](CONFIGURATION.md#自动化) |
 | `state-backup create` | **是** | 制作一个经过校验的 `.codex` 副本；`--wait` 会等待 Codex 关闭 | [配置](CONFIGURATION.md#codex-副本) |
 | `state-backup list` | 否 | 列出 `[state_backup] root_dir` 中的副本 | [配置](CONFIGURATION.md#codex-副本) |
+| `handoff status` | 否 | 哪台电脑在工作、各自交接了什么、什么已到达本机 | [同步](SYNC.md#在电脑之间交接工作) |
+| `handoff sync` | **是** | 载入其他电脑交接的内容，再交接本机；遇到任何冲突即停止 | [同步](SYNC.md#在电脑之间交接工作) |
+| `handoff watch` | **是** | 登录任务运行的监视器：启动时载入，Codex 关闭时交接 | [同步](SYNC.md#在电脑之间交接工作) |
 | `sessions scan` | 否 | 对两侧的每个会话分支分类 | [会话](SESSIONS.md) |
 | `sessions resolve` | 否 | 为一处分叉记录一个决定 | [会话](SESSIONS.md#分叉) |
 | `sessions apply` | **是** | 按一份已确认的计划整体传输分支 | [会话](SESSIONS.md#执行计划) |

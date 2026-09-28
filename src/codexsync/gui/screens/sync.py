@@ -44,7 +44,7 @@ KNOWN_FAILURES = (
     "FileNotFoundError",
 )
 #: Who may have started a run (`run_sync(origin=...)`).
-ORIGINS = ("window", "cli", "unattended")
+ORIGINS = ("window", "cli", "unattended", "handoff")
 
 
 class SyncModel(Model):

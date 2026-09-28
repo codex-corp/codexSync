@@ -65,6 +65,7 @@ owner that removes files from it on its own schedule. A path written with the
 | `[process_detection]` | Which processes mean "Codex is running" | [below](#process_detection) |
 | `[scheduler]` | The scheduled safe job | [below](#automation) |
 | `[state_backup]` | Copies of `.codex` after sign-in and/or every N hours | [below](#copies-of-codex) |
+| `[handoff]` | Handing work between machines, and the watcher task | [Synchronisation](SYNC.md#handing-work-over) |
 | `[logging]` | Level, format, rotation, retention | [below](#logging) |
 | `[safety]` | Fixed: Codex must be stopped, uncertainty aborts | not editable |
 | `[state]` | Where the sync manifest lives | — |
@@ -297,4 +298,4 @@ max_file_size_mb = 10
 - Every dangerous action is logged separately: backup created, overwrite, skip.
 - `file` must be outside `.codex`, and `level` must be one of the listed values.
 - `plan`, `sync`, `restore` and the commands a scheduled task runs (`guardian`,
-  `preflight`, `state-backup`) write to this file.
+  `preflight`, `state-backup`, `handoff`) write to this file.

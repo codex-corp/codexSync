@@ -143,6 +143,67 @@ With `propagate`:
   empty the same folder on the other side;
 - semantic-owned paths are never deleted this way.
 
+## Handing work over
+
+The protocol codexSync is built for is: close Codex on the machine you worked
+on, let the cloud deliver, sync on the next machine, and only then start Codex
+there. A **handoff** does the two syncs and checks the delivery in between:
+
+```toml
+[handoff]
+root_dir = "${workspace_root}/handoff"   # inside the synced workspace, beside the cloud copy
+enabled = true                           # the watcher task below
+delivery_wait_minutes = 15
+notify = true
+```
+
+```powershell
+codexsync -c config.toml handoff status                   # who is working, what was handed off, what arrived
+codexsync -c config.toml handoff status --check-delivery  # also hash the cloud copy
+codexsync -c config.toml handoff sync                     # load, then hand off; Codex must be closed
+codexsync -c config.toml handoff watch                    # what the task at sign-in runs
+```
+
+A handoff is one full sync with nobody deciding anything: settings as
+`sync --apply --unattended` does them, then chats as `sessions apply` does
+them, with the chat plan checked first. **Any conflict — of a file or of a
+chat — stops it before the first write**, and a chat is never merged. Only
+when both halves finished does the machine record the handoff.
+
+Each machine keeps one small file in `root_dir`: whether it is *working*
+(Codex was seen running) or has *handed off*, the id of its last handoff, a
+fingerprint of the cloud copy as that handoff left it (a size and SHA-256 per
+file, keyed by a hash of the path — no path or chat id is written), and which
+handoff of every other machine it has already loaded. Whether a handoff was
+loaded is decided by its id, never by comparing two machines' clocks; the
+times are there for you to read.
+
+**The watcher** (`enabled = true`) is a task that starts at sign-in and runs
+until you sign out:
+
+- at start, with Codex closed, it loads what another machine handed off. If
+  the cloud client has not brought all of it yet, it waits up to
+  `delivery_wait_minutes`, then gives up and tells you — nothing half-arrived
+  is loaded;
+- when Codex starts, it marks this machine as working and warns you if another
+  machine is still working or its handoff has not been loaded here;
+- when Codex closes, it hands off.
+
+It replaces the sync after sign-in: `handoff.enabled` and
+`scheduler.sync_at_login` together are a configuration error. What it does is
+reported with a system notification (`notify`) and always in the log. A
+machine that is shut down with Codex still open hands off at its next sign-in.
+
+`--accept-undelivered` loads a handoff that never fully arrives — use it only
+when you know why, for example when a file it named was changed by hand in the
+cloud copy since.
+
+**Not yet:** chats go to the cloud copy, but they are not placed into `.codex`
+on the other machine. Where Codex expects a chat file is unproven, so every
+write of a chat into `.codex` is refused (see [Sessions](SESSIONS.md)). A
+handoff says how many chats stayed in the cloud copy only, rather than calling
+the work loaded.
+
 ## History
 
 Every real sync leaves an operation journal, and the history is those journals
@@ -156,7 +217,7 @@ codexsync -c config.toml history --json --limit 0
 
 Each run shows when it started, its result (and, for a failure, the kind of
 error — never its message, which may name files), who started it (`window`,
-`cli` or `unattended` for the task at sign-in), how many files went to the
+`cli`, `unattended` for the task at sign-in, or `handoff` for the handoff watcher), how many files went to the
 cloud, to the local side and were deleted, and the backup it made. A journal
 written before 0.2 recorded these fields shows only its total.
 

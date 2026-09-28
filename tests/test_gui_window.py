@@ -328,6 +328,13 @@ class FakeController(Controller):
         self.calls.append(("create_codex_backup",))
         return self._answer("create_codex_backup", Outcome(failure=Failure.CODEX_NOT_STOPPED, message="open"))
 
+    def handoff(self) -> Outcome:
+        return self._answer("handoff", Outcome(failure=Failure.CONFIGURATION, message="not in this test"))
+
+    def handoff_now(self, *, progress=None) -> Outcome:
+        self.calls.append(("handoff_now",))
+        return self._answer("handoff_now", Outcome(failure=Failure.CODEX_NOT_STOPPED, message="open"))
+
 
 
 _MIGRATION_DIFF = "--- config.toml\n+++ config.toml\n-session_mode = \"last_date_only\"\n+session_mode = \"all\"\n"
@@ -421,7 +428,7 @@ class _WindowTestCase(unittest.TestCase):
         self.addCleanup(scheduler.stop)
         # Home reads the OS tasks and the process list too (CS-275), and the
         # Automation page lists the copies folder; both are answered here.
-        for name in ("home", "codex_backups"):
+        for name in ("home", "codex_backups", "handoff"):
             patcher = mock.patch(
                 f"codexsync.gui.controller.Controller.{name}",
                 return_value=Outcome(failure=Failure.CONFIGURATION, message="not in this test"),
@@ -2289,6 +2296,64 @@ class AutomationPageTests(_WindowTestCase):
         )
 
 
+class HandoffCardTests(_WindowTestCase):
+    """CS-328: the handoff board, its warnings, and handing off from the window."""
+
+    def _status(self):
+        from codexsync.app import HandoffStatus
+        from codexsync.handoff import HandoffRecord
+
+        own = HandoffRecord("laptop", "handed_off", "2026-09-27T06:00:00Z", "l1", 2, "2026-09-26T20:00:00Z")
+        desktop = HandoffRecord("desktop", "working", "2026-09-27T07:00:00Z", "d3", 3, "2026-09-27T05:00:00Z")
+        return HandoffStatus("laptop", Path("C:/w/handoff"), True, own, (desktop,), ("desktop",), ("desktop",))
+
+    def _screen(self, **outcomes):
+        controller = FakeController()
+        controller.outcomes.update(outcomes)
+        window, _ = self.make(controller=controller)
+        window.go_to("automation")
+        return window, controller, window.screen("automation")
+
+    def test_the_board_lists_every_machine_and_warns_about_work_not_handed_off(self) -> None:
+        window, _, screen = self._screen(handoff=Outcome(value=self._status()))
+        self.assertEqual(screen.handoff_table.rowCount(), 2)
+        self.assertEqual(screen.handoff_table.item(1, 4).text(), window.catalog.text("automation.handoff.here.pending"))
+        self.assertEqual(screen.handoff_table.item(1, 1).text(), window.catalog.text("automation.handoff.state.working"))
+        self.assertIn("desktop", screen.handoff_summary.text())
+        self.assertIn(
+            window.catalog.text("automation.handoff.warn.working", machine="desktop", since="").split("{")[0][:10],
+            screen.handoff_summary.text(),
+        )
+
+    def test_handing_off_asks_first_and_says_what_stayed_behind(self) -> None:
+        from codexsync.app import HandoffResult
+        from codexsync.handoff import HandoffRecord
+
+        done = HandoffResult("laptop", ("desktop",), 2, 1, False, HandoffRecord("laptop", "handed_off", "t"),
+                             chats_not_loaded=3)
+        window, controller, screen = self._screen(
+            handoff=Outcome(value=self._status()), handoff_now=Outcome(value=done),
+        )
+        screen.run_handoff_now()
+        self.assertTrue(self.confirmations, "a write from the window is always confirmed")
+        self.assertIn(("handoff_now",), controller.calls)
+        text = screen.handoff_status.text()
+        self.assertIn(window.catalog.text("automation.handoff.done.loaded", machine="desktop"), text)
+        self.assertIn(window.catalog.plural("automation.handoff.done.left", 3), text)
+
+    def test_declining_writes_nothing(self) -> None:
+        controller = FakeController()
+        window, _ = self.make(controller=controller, confirm=False)
+        window.go_to("automation")
+        window.screen("automation").run_handoff_now()
+        self.assertNotIn(("handoff_now",), controller.calls)
+
+    def test_a_refusal_says_why(self) -> None:
+        window, _, screen = self._screen()
+        screen.run_handoff_now()
+        self.assertIn(window.catalog.text("failure.codex-not-stopped"), screen.handoff_status.text())
+
+
 def _summary(**values):
     from codexsync.home_stats import CopiesStats, GuardianStats, HomeSummary, StateStats, SyncStats
 
@@ -2460,6 +2525,76 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class WheelGuardTests(_WindowTestCase):
+    """The wheel scrolls Settings; it does not change the field under the pointer.
+
+    Scrolling down the page used to flip the tabs and change numbers as the
+    pointer crossed them.
+    """
+
+    def _wheel(self, widget) -> None:
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
+        from PySide6.QtWidgets import QApplication
+
+        centre = QPointF(widget.rect().center())
+        event = QWheelEvent(
+            centre, QPointF(widget.mapToGlobal(centre.toPoint())), QPoint(0, 0), QPoint(0, -120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False,
+        )
+        QApplication.sendEvent(widget, event)
+
+    def _page(self):
+        from PySide6.QtWidgets import QScrollArea, QSpinBox, QTabBar, QVBoxLayout, QWidget
+
+        window, _controller = self.make()
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        tabs = QTabBar()
+        tabs.addTab("one")
+        tabs.addTab("two")
+        spin = QSpinBox()
+        spin.setRange(0, 100)
+        spin.setValue(50)
+        layout.addWidget(tabs)
+        layout.addWidget(spin)
+        filler = QWidget()
+        filler.setMinimumHeight(3000)
+        layout.addWidget(filler)
+        area.setWidget(inner)
+        area.resize(300, 300)
+        area.show()
+        self.pump(lambda: spin.isVisible())
+        self.addCleanup(area.close)
+        self.addCleanup(window.close)
+        return area, tabs, spin
+
+    def test_the_wheel_over_a_field_scrolls_the_page_instead(self) -> None:
+        area, _tabs, spin = self._page()
+        self._wheel(spin)
+        self.assertEqual(spin.value(), 50)
+        self.assertGreater(area.verticalScrollBar().value(), 0, "the page did not scroll")
+
+    def test_the_wheel_never_switches_tabs(self) -> None:
+        _area, tabs, _spin = self._page()
+        self._wheel(tabs)
+        self.assertEqual(tabs.currentIndex(), 0)
+
+    def test_a_field_clicked_into_still_takes_the_wheel(self) -> None:
+        from PySide6.QtCore import Qt
+
+        _area, _tabs, spin = self._page()
+        self.assertEqual(spin.focusPolicy(), Qt.FocusPolicy.StrongFocus, "the wheel must not focus a field")
+        spin.setFocus()
+        self.pump(lambda: spin.hasFocus(), seconds=2)
+        if not spin.hasFocus():
+            self.skipTest("this platform gives no focus to an offscreen window")
+        self._wheel(spin)
+        self.assertNotEqual(spin.value(), 50)
+
+
 class ConfigMigrationCardTests(_WindowTestCase):
     """The window's half of the config upgrade (CS-255).
 
@@ -2534,6 +2669,16 @@ class ConfigMigrationCardTests(_WindowTestCase):
         screen.toggle_migration_details()
         self.assertFalse(screen.migration_details_box.isHidden())
         self.assertEqual(screen.migration_findings.count(), 1)
+
+    def test_nothing_to_write_offers_no_update_button(self) -> None:
+        """A card of notes only must not show a greyed-out "update" (it was)."""
+        note = ConfigFinding("SECTION_ABSENT_GUARDIAN", "info", "no [guardian]", (), params={"section": "guardian"})
+        _window, _controller, screen = self._screen(
+            answers={"config_migration": Outcome(value=(ConfigMigrationPlan(1, "plan-note", "sha", (note,)), ""))}
+        )
+        self.assertFalse(screen.migration_card.isHidden(), "the note itself is still shown")
+        self.assertTrue(screen.migration_apply.isHidden())
+        self.assertTrue(screen.migration_toggle.isHidden())
 
     def test_findings_are_said_in_the_window_language(self) -> None:
         window, _controller = self.make("ru")

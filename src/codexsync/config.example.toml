@@ -243,3 +243,22 @@ interval_hours = 0
 # Copies of this machine to keep; older ones are removed after a new copy
 # has been verified.
 keep = 5
+
+[handoff]
+# Passing work between machines (see docs: Sync, "Handing work over").
+# Close Codex on one machine: it hands off (settings and chats go to the
+# cloud copy). Sign in on the other: it waits for the cloud to deliver that
+# handoff, then loads it before you start Codex there. A conflict of any kind
+# stops the whole handoff without writing anything; chats are never merged.
+# Folder with one small file per machine saying what it last handed off. It
+# must be inside the folder your cloud client syncs, and outside the Codex
+# state directory, backup_dir, temp_dir, the cloud mirror, guardian.root_dir,
+# semantic.root_dir and state_backup.root_dir. Empty: no handoff.
+root_dir = "${workspace_root}/handoff"
+# Install the background watcher that runs from sign-in: it loads at sign-in
+# and hands off whenever Codex closes. Replaces scheduler.sync_at_login.
+enabled = false
+# Minutes a load waits for another machine's handoff to arrive (0-1440).
+delivery_wait_minutes = 15
+# Report what happened with a system notification.
+notify = true

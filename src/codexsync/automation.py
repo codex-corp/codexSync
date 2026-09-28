@@ -22,6 +22,8 @@ from .exceptions import FailSafeError
 from .models import AppConfig
 from .process_detector import CodexProcessDetector
 from .system_scheduler import (
+    HANDOFF_MODE,
+    HANDOFF_SLOT,
     LOGIN_SYNC_MODE,
     LOGIN_SYNC_SLOT,
     STATE_BACKUP_MODE,
@@ -66,6 +68,14 @@ class AutomationView:
     backup_argv: tuple[str, ...] = ()
     backup_status: SchedulerStatus | None = None
     backup_status_error: str | None = None
+    #: `[handoff]` and the watcher's own task (CS-328, `D-018`).
+    handoff_root: Path | None = None
+    handoff_enabled: bool = False
+    handoff_wait_minutes: int = 15
+    handoff_notify: bool = True
+    handoff_argv: tuple[str, ...] = ()
+    handoff_status: SchedulerStatus | None = None
+    handoff_status_error: str | None = None
 
     @property
     def backup_scheduled(self) -> bool:
@@ -99,7 +109,9 @@ def _require_all(*adapters: SystemScheduler | None) -> None:
     the periodic task ran the real ``schtasks`` for the sign-in one.
     """
     if len({adapter is None for adapter in adapters}) > 1:
-        raise ValueError("inject scheduler, login_scheduler and backup_scheduler together, or none of them")
+        raise ValueError(
+            "inject scheduler, login_scheduler, backup_scheduler and handoff_scheduler together, or none of them"
+        )
 
 
 def login_sync_definition(cfg: AppConfig, config_path: Path) -> JobDefinition:
@@ -122,6 +134,12 @@ def state_backup_definition(cfg: AppConfig, config_path: Path) -> JobDefinition:
     return JobDefinition(job, tuple(job_command()), config_path.resolve(), _log_dir(cfg, config_path))
 
 
+def handoff_definition(cfg: AppConfig, config_path: Path) -> JobDefinition:
+    """The handoff watcher: started at sign-in and left running (`D-018`)."""
+    job = ScheduledJob(HANDOFF_MODE, None, True, cfg.scheduler.startup_delay_seconds, 0)
+    return JobDefinition(job, tuple(job_command()), config_path.resolve(), _log_dir(cfg, config_path))
+
+
 def job_definition(cfg: AppConfig, config_path: Path) -> JobDefinition:
     settings = cfg.scheduler
     job = ScheduledJob(
@@ -140,9 +158,10 @@ def automation_status(
     scheduler: SystemScheduler | None = None,
     login_scheduler: SystemScheduler | None = None,
     backup_scheduler: SystemScheduler | None = None,
+    handoff_scheduler: SystemScheduler | None = None,
 ) -> AutomationView:
     """What `[scheduler]` asks for, and what the OS actually has. Reads only."""
-    _require_all(scheduler, login_scheduler, backup_scheduler)
+    _require_all(scheduler, login_scheduler, backup_scheduler, handoff_scheduler)
     cfg = load_config(config_path)
     login_definition = login_sync_definition(cfg, config_path)
     login_status: SchedulerStatus | None = None
@@ -162,6 +181,15 @@ def automation_status(
         )
     except SchedulerError as exc:
         backup_error = str(exc)
+    watcher_definition = handoff_definition(cfg, config_path)
+    watcher_status: SchedulerStatus | None = None
+    watcher_error: str | None = None
+    try:
+        watcher_status = _scheduler(cfg, handoff_scheduler, slot=HANDOFF_SLOT).status(
+            expected=watcher_definition
+        )
+    except SchedulerError as exc:
+        watcher_error = str(exc)
     definition = job_definition(cfg, config_path)
     adapter = _scheduler(cfg, scheduler)
     status: SchedulerStatus | None = None
@@ -194,6 +222,13 @@ def automation_status(
         backup_argv=tuple(backup_definition.argv()),
         backup_status=backup_status,
         backup_status_error=backup_error,
+        handoff_root=cfg.handoff.root_dir,
+        handoff_enabled=bool(cfg.handoff.enabled),
+        handoff_wait_minutes=int(cfg.handoff.delivery_wait_minutes),
+        handoff_notify=bool(cfg.handoff.notify),
+        handoff_argv=tuple(watcher_definition.argv()),
+        handoff_status=watcher_status,
+        handoff_status_error=watcher_error,
     )
 
 
@@ -213,6 +248,7 @@ def _require_detectable_codex(cfg: AppConfig) -> None:
         name for name, on in (
             ("state_backup (at_login / interval_hours)", cfg.state_backup.scheduled),
             ("scheduler.sync_at_login", cfg.scheduler.sync_at_login),
+            ("handoff.enabled", cfg.handoff.enabled is True),
         ) if on
     ]
     if wanted and not _codex_detectable(cfg):
@@ -229,15 +265,27 @@ def apply_automation(
     scheduler: SystemScheduler | None = None,
     login_scheduler: SystemScheduler | None = None,
     backup_scheduler: SystemScheduler | None = None,
+    handoff_scheduler: SystemScheduler | None = None,
 ) -> AutomationView:
     """Make every OS task match the config: install what is on, remove what is off."""
-    _require_all(scheduler, login_scheduler, backup_scheduler)
+    _require_all(scheduler, login_scheduler, backup_scheduler, handoff_scheduler)
     cfg = load_config(config_path)
     _require_detectable_codex(cfg)
     adapter = _scheduler(cfg, scheduler)
     login_adapter = _scheduler(cfg, login_scheduler, slot=LOGIN_SYNC_SLOT)
     backup_adapter = _scheduler(cfg, backup_scheduler, slot=STATE_BACKUP_SLOT)
+    handoff_adapter = _scheduler(cfg, handoff_scheduler, slot=HANDOFF_SLOT)
     try:
+        if cfg.handoff.enabled is True:
+            definition = handoff_definition(cfg, config_path)
+            handoff_adapter.install(
+                definition.job,
+                command=definition.command,
+                config_path=definition.config_path,
+                log_dir=definition.log_dir,
+            )
+        else:
+            handoff_adapter.remove()
         if cfg.state_backup.scheduled:
             definition = state_backup_definition(cfg, config_path)
             backup_adapter.install(
@@ -273,7 +321,8 @@ def apply_automation(
         # task was not changed by this call, which is what fail-safe means here.
         raise FailSafeError(f"The scheduled task was not updated: {exc}") from exc
     return automation_status(
-        config_path, scheduler=adapter, login_scheduler=login_adapter, backup_scheduler=backup_adapter
+        config_path, scheduler=adapter, login_scheduler=login_adapter, backup_scheduler=backup_adapter,
+        handoff_scheduler=handoff_adapter,
     )
 
 
@@ -283,15 +332,17 @@ def remove_automation(
     scheduler: SystemScheduler | None = None,
     login_scheduler: SystemScheduler | None = None,
     backup_scheduler: SystemScheduler | None = None,
+    handoff_scheduler: SystemScheduler | None = None,
 ) -> bool:
     """Remove every task; ``True`` if any existed."""
-    _require_all(scheduler, login_scheduler, backup_scheduler)
+    _require_all(scheduler, login_scheduler, backup_scheduler, handoff_scheduler)
     cfg = load_config(config_path)
     try:
         periodic = _scheduler(cfg, scheduler).remove()
         login = _scheduler(cfg, login_scheduler, slot=LOGIN_SYNC_SLOT).remove()
         backup = _scheduler(cfg, backup_scheduler, slot=STATE_BACKUP_SLOT).remove()
-        return periodic or login or backup
+        watcher = _scheduler(cfg, handoff_scheduler, slot=HANDOFF_SLOT).remove()
+        return periodic or login or backup or watcher
     except SchedulerError as exc:
         raise FailSafeError(f"The scheduled task was not removed: {exc}") from exc
 
@@ -301,6 +352,7 @@ __all__ = [
     "SchedulerError",
     "apply_automation",
     "automation_status",
+    "handoff_definition",
     "job_definition",
     "login_sync_definition",
     "state_backup_definition",

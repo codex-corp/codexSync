@@ -25,7 +25,12 @@ a = Analysis(
     # `copy_metadata` carries the `dist-info` that `version.py` reads; without
     # it the exe reports `0.0.0+unknown` and stamps that into snapshot
     # manifests. Hardcoding the version instead is forbidden by design.
-    datas=copy_metadata("codexsync") + [(str(template), "codexsync")],
+    # The language files carry no Qt: the handoff watcher reads its
+    # notification texts from them (`notifications.py`), in the user's language.
+    datas=copy_metadata("codexsync") + [(str(template), "codexsync")] + [
+        (str(path), "codexsync/gui/locale")
+        for path in sorted((project_root / "src" / "codexsync" / "gui" / "locale").glob("*.json"))
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

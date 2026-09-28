@@ -18,10 +18,13 @@ import itertools
 import time
 from typing import Any, Callable, Iterable, Sequence
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractScrollArea,
+    QAbstractSpinBox,
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -32,6 +35,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -45,6 +49,57 @@ from .controller import Failure, Outcome
 
 #: A long read reports once per file; the window is redrawn far less often.
 PROGRESS_INTERVAL_MS = 100
+
+
+# --- the mouse wheel --------------------------------------------------------
+
+
+class WheelGuard(QObject):
+    """The wheel scrolls the page, not whatever field the pointer passes over.
+
+    Qt's default is that a number field or a drop-down changes its value under
+    the wheel, and a tab bar switches tabs, as soon as the pointer is over it:
+    scrolling down Settings silently changed values and flipped tabs. A field
+    takes the wheel only once it has been clicked into (focus policy
+    ``StrongFocus``, so the wheel itself never focuses it); a tab bar never
+    does. The wheel event goes to the nearest scrolling ancestor instead.
+    """
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt API
+        kind = event.type()
+        if kind == QEvent.Type.Polish and isinstance(obj, (QAbstractSpinBox, QComboBox)):
+            obj.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            return False
+        if kind != QEvent.Type.Wheel or not isinstance(obj, QWidget):
+            return False
+        if isinstance(obj, QTabBar) or (
+            isinstance(obj, (QAbstractSpinBox, QComboBox)) and not obj.hasFocus()
+        ):
+            scroller = _scroll_ancestor(obj)
+            if scroller is not None:
+                QApplication.sendEvent(scroller.verticalScrollBar(), event)
+            return True
+        return False
+
+
+def _scroll_ancestor(widget: QWidget) -> QAbstractScrollArea | None:
+    parent = widget.parentWidget()
+    while parent is not None:
+        if isinstance(parent, QAbstractScrollArea):
+            return parent
+        parent = parent.parentWidget()
+    return None
+
+
+def install_wheel_guard(app: QApplication) -> WheelGuard:
+    """Install the guard on ``app`` once; later calls return the same one."""
+    existing = getattr(app, "_codexsync_wheel_guard", None)
+    if isinstance(existing, WheelGuard):
+        return existing
+    guard = WheelGuard(app)
+    app.installEventFilter(guard)
+    app._codexsync_wheel_guard = guard  # type: ignore[attr-defined]
+    return guard
 
 
 # --- jobs --------------------------------------------------------------------
@@ -614,6 +669,8 @@ def vbox(*items: QWidget | QHBoxLayout | QVBoxLayout, spacing: int = 8) -> QVBox
 
 __all__ = [
     "Banner",
+    "WheelGuard",
+    "install_wheel_guard",
     "Cell",
     "JobRunner",
     "PathField",

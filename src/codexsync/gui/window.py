@@ -63,7 +63,7 @@ from .screens.no_config import NoConfigScreen
 from .screens.sessions import SessionsModel, SessionsScreen
 from .screens.settings import SettingsModel, SettingsScreen
 from .screens.sync import SyncModel, SyncScreen
-from .widgets import JobRunner
+from .widgets import JobRunner, install_wheel_guard
 
 RESOURCES = Path(__file__).resolve().parent / "resources"
 APP_ICON = RESOURCES / "codexsync.ico"
@@ -149,6 +149,9 @@ class MainWindow(QMainWindow):
         remember: Callable[[Path], object] | None = None,
     ) -> None:
         super().__init__()
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            install_wheel_guard(app)
         self._controller = controller
         self._settings = settings
         #: Records the opened config for the next start and for the command

@@ -22,6 +22,12 @@ than a missing feature:
   directory and writes into the folder the user chose; it waits for Codex to
   close instead of copying files that are being written, which is why its
   task is allowed a day rather than ten minutes.
+* **The handoff watcher is the one task that stays running** (`D-018`,
+  ``HANDOFF_SLOT``). ``handoff watch`` starts at sign-in and runs until the
+  user signs out: it loads what another machine handed off while Codex is
+  closed and hands off when Codex closes. Every write it starts goes through
+  the same gate and envelope as ``sync`` and ``sessions apply``, and any
+  conflict stops it, so its task has no time limit instead of a long one.
 * **User level only.** Task Scheduler runs the task as the current user with
   ``InteractiveToken``/``LeastPrivilege``; launchd gets a LaunchAgent, systemd
   a ``--user`` unit. Nothing asks for elevation, nothing registers as SYSTEM
@@ -84,14 +90,24 @@ _JOB_SUBCOMMANDS[LOGIN_SYNC_MODE] = ("sync", "--apply", "--unattended")
 STATE_BACKUP_MODE = "state_backup"
 _JOB_SUBCOMMANDS[STATE_BACKUP_MODE] = ("state-backup", "create", "--wait")
 
-#: Which of this user's three tasks an adapter manages.
+#: The handoff watcher (`[handoff] enabled`, `D-018`): started at sign-in and
+#: left running; it replaces the sign-in sync, never runs beside it.
+HANDOFF_MODE = "handoff_watch"
+_JOB_SUBCOMMANDS[HANDOFF_MODE] = ("handoff", "watch")
+
+#: Which of this user's four tasks an adapter manages.
 JOB_SLOT = "job"
 LOGIN_SYNC_SLOT = "sync-at-login"
 STATE_BACKUP_SLOT = "state-backup"
-SLOTS = (JOB_SLOT, LOGIN_SYNC_SLOT, STATE_BACKUP_SLOT)
+HANDOFF_SLOT = "handoff"
+SLOTS = (JOB_SLOT, LOGIN_SYNC_SLOT, STATE_BACKUP_SLOT, HANDOFF_SLOT)
 
 #: The mode each slot runs, for the slots that run exactly one.
-_SLOT_MODES = {LOGIN_SYNC_SLOT: LOGIN_SYNC_MODE, STATE_BACKUP_SLOT: STATE_BACKUP_MODE}
+_SLOT_MODES = {
+    LOGIN_SYNC_SLOT: LOGIN_SYNC_MODE,
+    STATE_BACKUP_SLOT: STATE_BACKUP_MODE,
+    HANDOFF_SLOT: HANDOFF_MODE,
+}
 
 MIN_INTERVAL_SECONDS = 60
 #: The copy's period is whole hours: a copy of a gigabyte is not a minute job.
@@ -119,9 +135,9 @@ class ScheduledJob:
     jitter_seconds: int = 0
 
     def __post_init__(self) -> None:
-        if self.mode == LOGIN_SYNC_MODE:
-            # Once, at sign-in, and nothing else: a repeating or a clock-driven
-            # sync would run while nobody is watching.
+        if self.mode in (LOGIN_SYNC_MODE, HANDOFF_MODE):
+            # Started at sign-in, and nothing else: a repeating or a
+            # clock-driven sync would run while nobody is watching.
             if self.interval_seconds is not None:
                 raise ValueError("the login sync never repeats: interval_seconds must be None")
             if self.run_at_login is not True:
@@ -499,6 +515,8 @@ def _job_description(job: ScheduledJob) -> str:
         return "codexSync settings sync once after sign-in; refused while Codex is open"
     if job.mode == STATE_BACKUP_MODE:
         return "codexSync copy of the Codex state; waits until Codex is closed"
+    if job.mode == HANDOFF_MODE:
+        return "codexSync handoff watcher; loads at sign-in and hands off when Codex closes"
     return f"codexSync periodic read-only job ({job.mode})"
 
 
@@ -520,7 +538,14 @@ def _time_limit_seconds(job: ScheduledJob) -> int:
     up by itself and says so -- so its limit is a day. Everything else is a
     short job that must never pile up.
     """
+    if job.mode == HANDOFF_MODE:
+        return 0  # no limit: the watcher runs until sign-out
     return 24 * 3600 if job.mode == STATE_BACKUP_MODE else 600
+
+
+def _systemd_time_limit(job: ScheduledJob) -> str:
+    limit = _time_limit_seconds(job)
+    return "infinity" if limit == 0 else f"{limit // 60}min"
 
 
 def system_scheduler(platform: str | None = None, **injections: Any) -> SystemScheduler:
@@ -578,9 +603,11 @@ def task_leaf_name(user_id: str) -> str:
 
 
 def task_name_for(user_id: str, slot: str = JOB_SLOT) -> str:
-    leaf = {LOGIN_SYNC_SLOT: LOGIN_SYNC_TASK_LEAF_NAME, STATE_BACKUP_SLOT: STATE_BACKUP_TASK_LEAF_NAME}.get(
-        _require_slot(slot)
-    )
+    leaf = {
+        LOGIN_SYNC_SLOT: LOGIN_SYNC_TASK_LEAF_NAME,
+        STATE_BACKUP_SLOT: STATE_BACKUP_TASK_LEAF_NAME,
+        HANDOFF_SLOT: HANDOFF_TASK_LEAF_NAME,
+    }.get(_require_slot(slot))
     if leaf is not None:
         cleaned = _TASK_NAME_FORBIDDEN.sub("-", user_id.strip()) or "user"
         return f"{TASK_FOLDER}{leaf} ({cleaned})"
@@ -589,6 +616,7 @@ def task_name_for(user_id: str, slot: str = JOB_SLOT) -> str:
 
 LOGIN_SYNC_TASK_LEAF_NAME = "CodexSync Sync at login"
 STATE_BACKUP_TASK_LEAF_NAME = "CodexSync Codex backup"
+HANDOFF_TASK_LEAF_NAME = "CodexSync Handoff"
 _TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 
 #: ``SCHED_S_*`` informational values Task Scheduler puts in LastTaskResult
@@ -641,7 +669,12 @@ def _check_windows_argument(argument: str) -> None:
 
 
 def task_duration(seconds: int) -> str:
-    """ISO 8601 duration as Task Scheduler writes it: minutes when whole."""
+    """ISO 8601 duration as Task Scheduler writes it: minutes when whole.
+
+    Zero is ``PT0S``, which is how Task Scheduler spells "no time limit".
+    """
+    if seconds == 0:
+        return "PT0S"
     if seconds % 60 == 0:
         return f"PT{seconds // 60}M"
     return f"PT{seconds}S"
@@ -1241,7 +1274,12 @@ class WindowsTaskScheduler:
 LAUNCHD_LABEL = "io.codexsync.job"
 LAUNCHD_LOGIN_SYNC_LABEL = "io.codexsync.sync-at-login"
 LAUNCHD_STATE_BACKUP_LABEL = "io.codexsync.state-backup"
-_LAUNCHD_LABELS = {LOGIN_SYNC_SLOT: LAUNCHD_LOGIN_SYNC_LABEL, STATE_BACKUP_SLOT: LAUNCHD_STATE_BACKUP_LABEL}
+LAUNCHD_HANDOFF_LABEL = "io.codexsync.handoff"
+_LAUNCHD_LABELS = {
+    LOGIN_SYNC_SLOT: LAUNCHD_LOGIN_SYNC_LABEL,
+    STATE_BACKUP_SLOT: LAUNCHD_STATE_BACKUP_LABEL,
+    HANDOFF_SLOT: LAUNCHD_HANDOFF_LABEL,
+}
 _LAST_EXIT_CODE = re.compile(r"^\s*last exit code\s*=\s*(-?\d+)", re.MULTILINE)
 
 
@@ -1387,6 +1425,8 @@ SYSTEMD_LOGIN_SYNC_SERVICE = "codexsync-sync-at-login.service"
 SYSTEMD_LOGIN_SYNC_TIMER = "codexsync-sync-at-login.timer"
 SYSTEMD_STATE_BACKUP_SERVICE = "codexsync-state-backup.service"
 SYSTEMD_STATE_BACKUP_TIMER = "codexsync-state-backup.timer"
+SYSTEMD_HANDOFF_SERVICE = "codexsync-handoff.service"
+SYSTEMD_HANDOFF_TIMER = "codexsync-handoff.timer"
 _SYSTEMD_SAFE = re.compile(r"^[A-Za-z0-9_@+=:,./-]+$")
 
 
@@ -1492,6 +1532,7 @@ class SystemdUserScheduler:
             JOB_SLOT: (SYSTEMD_SERVICE, SYSTEMD_TIMER),
             LOGIN_SYNC_SLOT: (SYSTEMD_LOGIN_SYNC_SERVICE, SYSTEMD_LOGIN_SYNC_TIMER),
             STATE_BACKUP_SLOT: (SYSTEMD_STATE_BACKUP_SERVICE, SYSTEMD_STATE_BACKUP_TIMER),
+            HANDOFF_SLOT: (SYSTEMD_HANDOFF_SERVICE, SYSTEMD_HANDOFF_TIMER),
         }[self._slot]
         self._home = Path.home() if home is None else Path(home)
         self._protected = tuple(default_protected_roots(self._home) if protected_roots is None else protected_roots)
@@ -1515,7 +1556,7 @@ class SystemdUserScheduler:
             "[Service]",
             "Type=oneshot",
             f"ExecStart={exec_start}",
-            f"TimeoutStartSec={_time_limit_seconds(job) // 60}min",
+            f"TimeoutStartSec={_systemd_time_limit(job)}",
             f"StandardOutput=append:{_systemd_path_value(definition.log_dir / f'{stem}.out.log')}",
             f"StandardError=append:{_systemd_path_value(definition.log_dir / f'{stem}.err.log')}",
             "",
@@ -1715,6 +1756,8 @@ def _normalise_unit_text(text: str) -> list[str]:
 
 
 __all__ = [
+    "HANDOFF_MODE",
+    "HANDOFF_SLOT",
     "JOB_MODES",
     "STATE_BACKUP_MODE",
     "STATE_BACKUP_SLOT",

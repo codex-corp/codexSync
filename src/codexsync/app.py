@@ -14,11 +14,12 @@ import json
 import os
 import platform
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .config import PATH_SUBSTITUTIONS, load_config, preview_path
 from .progress import PHASES, ProgressCallback
@@ -50,12 +51,13 @@ from .config_migrate import (
     render_migrated_text,
 )
 from .config import require_guardian_identity
-from .exceptions import ConfigError, ConflictError, FailSafeError
+from .exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .backup import BackupManager
 from .manifest import build_manifest, load_manifest, save_manifest
 from .mutation_journal import JournalState, JournalStore, MutationJournal
 from .models import (
     DEFAULT_SCHEDULER_INTERVAL_SECONDS,
+    MAX_HANDOFF_DELIVERY_WAIT_MINUTES,
     MAX_SCHEDULER_INTERVAL_SECONDS,
     MAX_STATE_BACKUP_INTERVAL_HOURS,
     MIN_SCHEDULER_INTERVAL_SECONDS,
@@ -138,6 +140,7 @@ from .session_scope import (
     load_session_scope,
     save_session_scope,
     scope_path_for,
+    _file_safe as _scope_file_safe,
 )
 from .semantic_transfer import (
     BranchResolution,
@@ -167,6 +170,20 @@ from .session_index import (
 from .stable_reader import SourceMissingError, SourceTooLargeError, SourceUnstableError, StableReader
 from .state_locator import locate_local_state_dir, locate_state_dirs
 from .sync_engine import SyncEngine
+from .handoff import (
+    Board,
+    Delivery,
+    Fingerprinter,
+    HandoffError,
+    HandoffRecord,
+    STATE_WORKING,
+    delivery,
+    machine_key,
+    mark_working,
+    read_board,
+    record_handoff,
+)
+from .notifications import Notifier
 from .version import PRODUCER_VERSION, __version__
 
 LOG = logging.getLogger(__name__)
@@ -174,6 +191,13 @@ LOG = logging.getLogger(__name__)
 __all__ = [
     "__version__",
     "BROKEN_TASK_CODES",
+    "MAX_HANDOFF_DELIVERY_WAIT_MINUTES",
+    "HandoffNotDelivered",
+    "HandoffResult",
+    "HandoffStatus",
+    "handoff_status",
+    "run_handoff",
+    "watch_handoff",
     "MAX_STATE_BACKUP_INTERVAL_HOURS",
     "DEFAULT_SCHEDULER_INTERVAL_SECONDS",
     "MIN_SCHEDULER_INTERVAL_SECONDS",
@@ -1654,6 +1678,369 @@ def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> No
             except Exception:
                 LOG.exception("Could not persist terminal mutation journal state")
             raise
+
+
+# --- handing work between machines (CS-328, `D-018`) -------------------------
+
+#: How often a load looks again while the cloud is still delivering.
+HANDOFF_DELIVERY_POLL_SECONDS = 15.0
+#: How often the watcher asks whether Codex is running.
+HANDOFF_WATCH_POLL_SECONDS = 10.0
+
+
+#: Blocked actions that leave a newer chat in the mirror and not in `.codex`.
+#: Each is a standing limit (`PROVEN_LAYOUTS`, the SQLite thread catalogue),
+#: not a decision, so it does not stop a handoff -- but it is counted.
+_CHATS_LEFT_IN_THE_MIRROR = frozenset({
+    TransferAction.BLOCKED_UNPROVEN_LAYOUT,
+    TransferAction.BLOCKED_UNSUPPORTED_BACKEND,
+    TransferAction.BLOCKED_INVALID_BRANCH,
+})
+
+
+class HandoffNotDelivered(FailSafeError):
+    """Another machine's handoff has not fully arrived in the cloud copy."""
+
+    def __init__(self, deliveries: Sequence[Delivery]) -> None:
+        self.deliveries = tuple(deliveries)
+        waiting = ", ".join(
+            f"{item.machine} ({item.arrived} of {item.total} files)" for item in self.deliveries
+        )
+        super().__init__(
+            f"The handoff from {waiting} has not fully arrived in the cloud copy; nothing was "
+            "loaded. Wait for the cloud client, or pass --accept-undelivered if you know it "
+            "never will."
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffResult:
+    machine: str
+    #: Machines whose handoff this run took.
+    taken: tuple[str, ...]
+    #: Files the settings sync wrote (both directions).
+    sync_actions: int
+    #: Session branches written (both directions).
+    session_actions: int
+    #: Whether this run wrote to the cloud copy, i.e. handed something off.
+    handed_off: bool
+    record: HandoffRecord
+    waited_seconds: float = 0.0
+    #: Chats the cloud copy holds newer than `.codex` that could not be put
+    #: there: no proven layout, or a thread the catalogue does not place.
+    #: Reported, because "loaded" must not be said of work that stayed behind.
+    chats_not_loaded: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffStatus:
+    """What `handoff status` and the window say. Reads only."""
+
+    machine: str
+    root: Path
+    enabled: bool
+    own: HandoffRecord | None
+    others: tuple[HandoffRecord, ...]
+    #: Machines whose last handoff this machine has not taken.
+    pending: tuple[str, ...]
+    #: Machines marked working that have not handed off since.
+    working_elsewhere: tuple[str, ...]
+    #: Per pending machine, how much has arrived; empty unless asked for.
+    deliveries: tuple[Delivery, ...] = ()
+    unreadable: tuple[str, ...] = ()
+
+
+def _handoff_root(cfg: AppConfig) -> Path:
+    root = cfg.handoff.root_dir
+    if root is None:
+        raise ConfigError("handoff.root_dir is empty: choose a folder inside the synced workspace")
+    return root
+
+
+def _handoff_machine(cfg: AppConfig) -> str:
+    try:
+        return machine_key(require_guardian_identity(cfg))
+    except HandoffError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def handoff_status(config_path: Path, *, check_delivery: bool = False) -> HandoffStatus:
+    """Every machine's handoff as this machine sees it. Reads only.
+
+    ``check_delivery`` hashes the cloud copy to say how much of each pending
+    handoff has arrived; it reads every mirrored file, so it is asked for.
+    """
+    cfg = load_config(config_path)
+    root = _handoff_root(cfg)
+    machine = _handoff_machine(cfg)
+    board = read_board(root)
+    pending = board.pending(machine)
+    deliveries: tuple[Delivery, ...] = ()
+    if check_delivery and pending:
+        current = Fingerprinter().files(cfg)
+        deliveries = tuple(delivery(record, current) for record in pending)
+    return HandoffStatus(
+        machine=machine,
+        root=root,
+        enabled=bool(cfg.handoff.enabled),
+        own=board.own(machine),
+        others=tuple(board.others(machine)),
+        pending=tuple(record.machine for record in pending),
+        working_elsewhere=tuple(record.machine for record in board.working_elsewhere(machine)),
+        deliveries=deliveries,
+        unreadable=tuple(sorted(board.unreadable)),
+    )
+
+
+def _wait_for_delivery(
+    cfg: AppConfig,
+    pending: Sequence[HandoffRecord],
+    fingerprints: Fingerprinter,
+    *,
+    wait_seconds: float,
+    poll_seconds: float,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+    on_wait: Callable[[Sequence[Delivery]], None] | None,
+) -> float:
+    """Return once every pending handoff is in the cloud copy; the seconds waited."""
+    started = monotonic()
+    while True:
+        current = fingerprints.files(cfg)
+        late = [item for item in (delivery(record, current) for record in pending) if not item.delivered]
+        waited = monotonic() - started
+        if not late:
+            return waited
+        if waited >= wait_seconds:
+            raise HandoffNotDelivered(late)
+        LOG.info(
+            "waiting for the cloud to deliver: %s",
+            ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late),
+        )
+        if on_wait is not None:
+            on_wait(late)
+        sleep(min(poll_seconds, wait_seconds - waited))
+
+
+def _handoff_source(board: Board, machine: str, pending: Sequence[HandoffRecord]) -> str:
+    """The other machine of the chat transfer's pair, as the window names it.
+
+    The pair keys the working set and the recorded decisions, so a handoff
+    uses the ones the person chose for that machine. Before any other machine
+    has written a handoff there is no pair; this machine stands in for it,
+    which maps no paths and matches no stored choice.
+    """
+    if pending:
+        return pending[-1].machine
+    others = sorted(board.others(machine), key=lambda record: record.generation)
+    return others[-1].machine if others else machine
+
+
+def run_handoff(
+    config_path: Path,
+    *,
+    origin: str = "handoff",
+    wait_seconds: float | None = None,
+    accept_undelivered: bool = False,
+    poll_seconds: float = HANDOFF_DELIVERY_POLL_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    on_wait: Callable[[Sequence[Delivery]], None] | None = None,
+    progress: ProgressCallback | None = None,
+) -> HandoffResult:
+    """One full sync with nobody deciding anything, then the handoff record.
+
+    Settings are synced with conflicts forced to `manual_abort` (`D-016`), and
+    chats with the plan applied by its own id in the same process (`D-018`).
+    Anything that needs a person -- a conflict of either kind, a target
+    collision, an archive move -- stops the run before the first write, and
+    the handoff record is written only when both halves finished: a record
+    that claimed a handoff which did not happen is exactly the lie the other
+    machine would act on.
+
+    Other machines' handoffs are waited for first, up to ``wait_seconds``
+    (``[handoff] delivery_wait_minutes``); loading half of one is how a file
+    the cloud client was still writing would be copied into `.codex`.
+    """
+    cfg = load_config(config_path)
+    root = _handoff_root(cfg)
+    machine = _handoff_machine(cfg)
+    _require_mutation_compatible_config(cfg)
+    # Waiting for the cloud is pointless while Codex is open: every write that
+    # follows would be refused anyway.
+    _make_safety_gate(cfg).require(OperationKind.SYNC)
+
+    board = read_board(root)
+    for name, reason in sorted(board.unreadable.items()):
+        LOG.warning("handoff file %s is not believed: %s", name, reason)
+    pending = board.pending(machine)
+    fingerprints = Fingerprinter()
+    if wait_seconds is None:
+        wait_seconds = float(cfg.handoff.delivery_wait_minutes) * 60.0
+    waited = 0.0
+    if pending:
+        try:
+            waited = _wait_for_delivery(
+                cfg, pending, fingerprints, wait_seconds=wait_seconds, poll_seconds=poll_seconds,
+                monotonic=monotonic, sleep=sleep, on_wait=on_wait,
+            )
+        except HandoffNotDelivered as exc:
+            if not accept_undelivered:
+                raise
+            LOG.warning("loading anyway, as asked: %s", exc)
+
+    # Chats first, and read-only: a decision found here stops the run before
+    # the settings sync has written anything.
+    source = _handoff_source(board, machine, pending)
+    plans = _plans_dir(cfg)
+    pair = f"{_scope_file_safe(source)}-{_scope_file_safe(machine)}"
+    resolutions = plans / f"sessions-resolutions-{pair}.json"
+    resolutions_path = resolutions if resolutions.is_file() else None
+    stored_scope = read_working_set(config_path, source_machine=source, target_machine=machine)
+    scope = None if stored_scope.is_empty else build_working_set(
+        config_path, projects=stored_scope.projects, chats=stored_scope.chats,
+    )
+    plan = scan_session_transfer(
+        config_path, source_machine=source, target_machine=machine,
+        resolutions_path=resolutions_path, progress=progress, scope=scope,
+    )
+    if plan.volatile:
+        raise SafetyPreconditionError("Codex started while the chats were being read; nothing was written")
+    unresolved = [item for item in plan.blocked_items if item.action in _UNRESOLVED_TRANSFER_BLOCKS]
+    archive_moves = [item for item in plan.items if item.action is TransferAction.ARCHIVE_TRANSITION]
+    if unresolved or archive_moves:
+        raise ConflictError(
+            f"{len(unresolved) + len(archive_moves)} chat(s) need a decision "
+            "(`sessions scan` shows which); nothing was written"
+        )
+    plan_path = plans / f"handoff-sessions-plan-{pair}.json"
+    save_transfer_plan(plan, plan_path)
+
+    ctx = build_context(config_path, enforce_safety=True, unattended=True)
+    run_sync(ctx, dry_run=False, origin=origin)
+    session_actions = apply_session_transfer(
+        config_path, plan_path=plan_path, confirm_plan=plan.plan_id, resolutions_path=resolutions_path,
+    )
+    to_cloud = len(ctx.plan.to_cloud) + sum(
+        1 for item in plan.items if item.action is TransferAction.FAST_FORWARD_REMOTE
+    )
+    # A run that wrote nothing to the cloud hands nothing off: a new id would
+    # make every other machine wait for a "delivery" of what it already has.
+    handed_off = to_cloud > 0
+    record = record_handoff(
+        root, machine, files=fingerprints.files(cfg), taken=pending, new_handoff=handed_off,
+    )
+    LOG.info(
+        "handoff finished: %d file(s) and %d chat(s) written; took %s; %s",
+        ctx.plan.action_count, session_actions,
+        ", ".join(item.machine for item in pending) or "nothing",
+        f"handed off {record.handoff_id}" if handed_off else "nothing new to hand off",
+    )
+    left_behind = sum(1 for item in plan.blocked_items if item.action in _CHATS_LEFT_IN_THE_MIRROR)
+    return HandoffResult(
+        machine=machine,
+        chats_not_loaded=left_behind,
+        taken=tuple(item.machine for item in pending),
+        sync_actions=ctx.plan.action_count,
+        session_actions=session_actions,
+        handed_off=handed_off,
+        record=record,
+        waited_seconds=waited,
+    )
+
+
+def _codex_state(config_path: Path) -> ProcessState:
+    return _make_safety_gate(load_config(config_path)).check(OperationKind.PLAN).process_state
+
+
+def watch_handoff(
+    config_path: Path,
+    *,
+    probe: Callable[[], ProcessState] | None = None,
+    notifier: Callable[..., object] | None = None,
+    handoff: Callable[..., HandoffResult] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    poll_seconds: float = HANDOFF_WATCH_POLL_SECONDS,
+    should_stop: Callable[[], bool] = lambda: False,
+) -> None:
+    """Run from sign-in: load while Codex is closed, hand off when it closes.
+
+    Only a state the process check is sure of counts. ``UNKNOWN`` is neither
+    a start nor a close, so a failed process listing can never trigger a
+    sync -- and the gate inside every write checks again anyway.
+
+    - At start, with Codex closed: load (waiting for the cloud to deliver).
+    - Codex starts: mark this machine as working, and warn when another
+      machine is still working or its handoff has not been taken here.
+    - Codex closes: hand off.
+
+    Nothing here ends the loop: an error is logged and reported, and the
+    watcher goes on waiting for the next change.
+    """
+    cfg = load_config(config_path)
+    root = _handoff_root(cfg)
+    machine = _handoff_machine(cfg)
+    notify = notifier if notifier is not None else Notifier(enabled=bool(cfg.handoff.notify))
+    sample = probe if probe is not None else (lambda: _codex_state(config_path))
+    act = handoff if handoff is not None else run_handoff
+
+    def attempt(closing: bool) -> None:
+        try:
+            result = act(config_path)
+        except HandoffNotDelivered as exc:
+            LOG.warning("%s", exc)
+            late = exc.deliveries[0]
+            notify("notify.not_delivered", machine=late.machine, arrived=late.arrived, total=late.total)
+        except SafetyPreconditionError:
+            LOG.info("Codex is open; the handoff waits for it to close")
+            if not closing:
+                notify("notify.codex_open")
+        except ConflictError as exc:
+            LOG.warning("handoff stopped: %s", exc)
+            notify("notify.conflict")
+        except Exception as exc:  # noqa: BLE001 - the watcher outlives any one run
+            LOG.exception("handoff failed")
+            notify("notify.failed", reason=type(exc).__name__)
+        else:
+            if result.taken and result.chats_not_loaded:
+                notify(
+                    "notify.loaded_partial", machine=", ".join(result.taken), count=result.chats_not_loaded,
+                )
+            elif result.taken:
+                notify("notify.loaded", machine=", ".join(result.taken))
+            elif closing and result.handed_off:
+                notify("notify.handed_off")
+
+    def codex_started() -> None:
+        try:
+            mark_working(root, machine)
+            board = read_board(root)
+        except (OSError, HandoffError) as exc:
+            LOG.warning("could not record that Codex is running here: %s", exc)
+            return
+        for record in board.working_elsewhere(machine):
+            notify("notify.working_elsewhere", machine=record.machine, since=record.state_since_utc)
+        for record in board.pending(machine):
+            if record.state != STATE_WORKING:
+                notify("notify.not_taken", machine=record.machine, since=record.handed_off_at_utc)
+
+    last = sample()
+    if last is ProcessState.STOPPED:
+        attempt(closing=False)
+    elif last is ProcessState.RUNNING:
+        codex_started()
+    else:
+        last = None
+    while not should_stop():
+        sleep(poll_seconds)
+        state = sample()
+        if state is ProcessState.UNKNOWN:
+            continue
+        if state is ProcessState.RUNNING and last is not ProcessState.RUNNING:
+            codex_started()
+        elif state is ProcessState.STOPPED and last is ProcessState.RUNNING:
+            attempt(closing=True)
+        last = state
 
 
 def validate_config_only(config_path: Path) -> tuple[str, ...]:

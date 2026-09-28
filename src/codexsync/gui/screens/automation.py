@@ -1,8 +1,9 @@
 """Automation: every task the operating system runs for CodexSync, on one page (CS-276).
 
-Three tasks, three cards, one file. The periodic safe job (`[scheduler]`), the
-settings sync after sign-in (`sync_at_login`, `D-016`) and the copy of `.codex`
-(`[state_backup]`, `D-017`) each have their own OS task, and each card shows
+Four tasks, four cards, one file. The periodic safe job (`[scheduler]`), the
+settings sync after sign-in (`sync_at_login`, `D-016`), the copy of `.codex`
+(`[state_backup]`, `D-017`) and the handoff watcher (`[handoff]`, `D-018`)
+each have their own OS task, and each card shows
 its settings next to what the operating system actually has -- installed or
 not, last run, what that run's exit code meant. The settings are edited the
 way Settings edits them (`ConfigFormScreen`): `config.toml` stays the only
@@ -25,6 +26,7 @@ from ..controller import (
     MIN_SCHEDULER_INTERVAL_SECONDS,
     FOREIGN_TASK,
     LEGACY_TASK,
+    MAX_HANDOFF_DELIVERY_WAIT_MINUTES,
     MAX_STATE_BACKUP_INTERVAL_HOURS,
     REMOVE,
     Outcome,
@@ -53,6 +55,12 @@ BACKUP_FIELDS: tuple[Field, ...] = (
     Field("state_backup", "at_login", "bool", False),
     Field("state_backup", "interval_hours", "int", 0, maximum=MAX_STATE_BACKUP_INTERVAL_HOURS),
     Field("state_backup", "keep", "int", 5, minimum=1, maximum=1000),
+)
+HANDOFF_FIELDS: tuple[Field, ...] = (
+    Field("handoff", "root_dir", "path", ""),
+    Field("handoff", "enabled", "bool", False),
+    Field("handoff", "delivery_wait_minutes", "int", 15, maximum=MAX_HANDOFF_DELIVERY_WAIT_MINUTES),
+    Field("handoff", "notify", "bool", True),
 )
 
 #: Keys an older `[scheduler]` section carries that the current contract
@@ -83,11 +91,17 @@ class AutomationModel(ConfigFormModel):
         self.copies_busy = False
         self.copy_busy = False
         self.copy_result: Outcome | None = None
+        #: The handoff board (CS-328), read on arrival like the task status.
+        self.handoff: Outcome | None = None
+        self.handoff_busy = False
+        self.handoff_run_busy = False
+        self.handoff_result: Outcome | None = None
 
     def reset_plans(self) -> None:
         super().reset_plans()
         self.automation = None
         self.copies = None
+        self.handoff = None
 
 
 class AutomationScreen(ConfigFormScreen):
@@ -95,7 +109,7 @@ class AutomationScreen(ConfigFormScreen):
     scrollable = True
 
     def form_fields(self):
-        return (*PERIODIC_FIELDS, *LOGIN_FIELDS, *BACKUP_FIELDS)
+        return (*PERIODIC_FIELDS, *LOGIN_FIELDS, *BACKUP_FIELDS, *HANDOFF_FIELDS)
 
     def build(self) -> None:
         self.init_form()
@@ -145,6 +159,30 @@ class AutomationScreen(ConfigFormScreen):
         layout.addWidget(self.copy_status)
         self.body.addWidget(frame)
 
+        frame, layout = self.form_card(HANDOFF_FIELDS, self.t("automation.handoff.title"))
+        layout.addWidget(label(self.t("automation.handoff.caption"), "muted", wrap=True))
+        self.handoff_task = label("", wrap=True)
+        layout.addWidget(self.handoff_task)
+        self.handoff_summary = label("", wrap=True)
+        layout.addWidget(self.handoff_summary)
+        self.handoff_table = table([
+            self.t("automation.handoff.column.machine"),
+            self.t("automation.handoff.column.state"),
+            self.t("automation.handoff.column.since"),
+            self.t("automation.handoff.column.last"),
+            self.t("automation.handoff.column.here"),
+        ], stretch=0)
+        self.handoff_table.setMinimumHeight(110)
+        layout.addWidget(self.handoff_table)
+        self.handoff_now = button(self.t("automation.handoff.now"))
+        self.handoff_now.clicked.connect(self.run_handoff_now)
+        self.handoff_refresh = button(self.t("action.refresh"))
+        self.handoff_refresh.clicked.connect(self.refresh_handoff)
+        layout.addLayout(row(self.handoff_now, self.handoff_refresh))
+        self.handoff_status = label("", wrap=True)
+        layout.addWidget(self.handoff_status)
+        self.body.addWidget(frame)
+
         tasks, tasks_layout = card(self.t("automation.task.title"))
         tasks_layout.addWidget(label(self.t("automation.task.caption"), "muted", wrap=True))
         self.task_apply = button(self.t("automation.apply"), primary=True)
@@ -172,6 +210,8 @@ class AutomationScreen(ConfigFormScreen):
             self.refresh_task()
         if self.model.copies is None and not self.model.copies_busy:
             self.refresh_copies()
+        if self.model.handoff is None and not self.model.handoff_busy:
+            self.refresh_handoff()
 
     def field_changed(self, field: Field) -> None:
         # The cards describe the draft, not only what was last saved.
@@ -213,6 +253,49 @@ class AutomationScreen(ConfigFormScreen):
             model.copies = outcome
 
         self.read(self.host.controller.codex_backups, apply)
+
+    def refresh_handoff(self) -> None:
+        """Read the handoff folder. A config without one is a line, not an error."""
+        model = self.model
+        if model.handoff_busy or not self.host.controller.config_exists():
+            return
+        model.handoff_busy = True
+        self.render()
+
+        def apply(model: AutomationModel, outcome: Outcome) -> None:
+            model.handoff_busy = False
+            model.handoff = outcome
+
+        self.read(self.host.controller.handoff, apply)
+
+    def run_handoff_now(self) -> None:
+        """Load and hand off now. A write: asked first, never cancellable."""
+        model = self.model
+        if model.handoff_run_busy:
+            return
+        if not self.host.confirm(
+            self.t("automation.handoff.confirm.title"),
+            self.t("automation.handoff.confirm.body"),
+            self.t("automation.handoff.now"),
+        ):
+            return
+        model.handoff_run_busy = True
+        model.handoff_result = None
+        self.render()
+        controller = self.host.controller
+
+        def go(progress=None) -> Outcome:
+            done = controller.handoff_now(progress=progress)
+            return Outcome(value=(done, controller.handoff()))
+
+        def apply(model: AutomationModel, outcome: Outcome) -> None:
+            model.handoff_run_busy = False
+            if not outcome.ok:
+                model.handoff_result = outcome
+                return
+            model.handoff_result, model.handoff = outcome.value
+
+        self.host.run(self.page, go, apply, progress=True)
 
     def create_copy(self) -> None:
         """One copy now; the page lists the folder again when it is done."""
@@ -324,6 +407,7 @@ class AutomationScreen(ConfigFormScreen):
         self._render_paths()
         self._render_task()
         self._render_copies()
+        self._render_handoff()
         self._render_changes()
 
     def _value(self, section: str, key: str) -> Any:
@@ -363,7 +447,7 @@ class AutomationScreen(ConfigFormScreen):
         self.task_apply.setEnabled(exists and not busy)
         installed = view is not None and any(
             status is not None and status.installed
-            for status in (view.status, view.login_status, view.backup_status)
+            for status in (view.status, view.login_status, view.backup_status, view.handoff_status)
         )
         self.task_remove.setEnabled(exists and not busy and installed)
 
@@ -528,6 +612,121 @@ class AutomationScreen(ConfigFormScreen):
         self.backup_task.setText(text)
         set_tone(self.backup_task, tone, palette)
         self.backup_task.setVisible(bool(text))
+
+    def _render_handoff_task(self, view) -> str:
+        """One line on the watcher task, described from the draft and the OS."""
+        folder = str(self._value("handoff", "root_dir") or "").strip()
+        wanted = bool(self._value("handoff", "enabled"))
+        status = view.handoff_status if view is not None else None
+        installed = status is not None and status.installed
+        if not folder:
+            return "attention" if wanted else "", self.t("automation.handoff.no_folder")
+        if view is not None and view.handoff_status_error:
+            return "danger", self.t("automation.handoff.error", error=view.handoff_status_error)
+        if not wanted and not installed:
+            return "", self.t("automation.handoff.off")
+        if not wanted:
+            return "attention", self.t("automation.handoff.installed_but_off")
+        if view is None:
+            return "", self.t("automation.handoff.pending")
+        if not installed:
+            return "attention", self.t("automation.handoff.not_installed")
+        if status.definition_matches is False:
+            return "attention", self.t("automation.handoff.outdated")
+        return "ok", self.t("automation.handoff.active")
+
+    def _render_handoff(self) -> None:
+        model = self.model
+        palette = self.palette_
+        tone, text = self._render_handoff_task(self._view())
+        self.handoff_task.setText(text)
+        set_tone(self.handoff_task, tone or None, palette)
+        self.handoff_task.setVisible(bool(text))
+
+        exists = self.host.controller.config_exists()
+        board = model.handoff
+        # The saved file decides, not the draft: the folder the core would
+        # use is the one on disk. A board that was read proves it is set.
+        saved_folder = bool(str(self._file_value(HANDOFF_FIELDS[0]) or "").strip()) or (
+            board is not None and board.ok
+        )
+        self.handoff_now.setEnabled(exists and saved_folder and not model.handoff_run_busy)
+        self.handoff_refresh.setEnabled(exists and not model.handoff_busy and not model.handoff_run_busy)
+
+        rows = []
+        lines: list[str] = []
+        summary_tone = None
+        if board is not None and board.ok and board.value is not None:
+            status = board.value
+            records = ([status.own] if status.own is not None else []) + list(status.others)
+            for record in records:
+                own = record.machine == status.machine
+                if own:
+                    here = self.t("automation.handoff.here.own")
+                elif record.machine in status.pending:
+                    here = self.t("automation.handoff.here.pending")
+                elif record.handoff_id:
+                    here = self.t("automation.handoff.here.taken")
+                else:
+                    here = "—"
+                rows.append([
+                    Cell(record.machine + (" " + self.t("automation.handoff.this_machine") if own else "")),
+                    Cell(self.t(f"automation.handoff.state.{record.state}")),
+                    Cell(local_time(record.state_since_utc) if record.state_since_utc else "—"),
+                    Cell(local_time(record.handed_off_at_utc) if record.handed_off_at_utc else "—"),
+                    Cell(here, muted=own),
+                ])
+            for machine in status.working_elsewhere:
+                since = next((r.state_since_utc for r in status.others if r.machine == machine), "")
+                lines.append(self.t(
+                    "automation.handoff.warn.working", machine=machine,
+                    since=local_time(since) if since else "?",
+                ))
+            for machine in status.pending:
+                if machine not in status.working_elsewhere:
+                    lines.append(self.t("automation.handoff.warn.pending", machine=machine))
+            if status.unreadable:
+                lines.append(self.p("automation.handoff.unreadable", len(status.unreadable)))
+            if lines:
+                summary_tone = "attention"
+            elif not records:
+                lines.append(self.t("automation.handoff.none"))
+        elif board is not None and not board.ok and saved_folder:
+            # Without a folder the task line already says what to do; the
+            # refusal behind it would only repeat that as an error.
+            lines.append(self.failure_text(board))
+            summary_tone = "danger"
+        elif model.handoff_busy:
+            lines.append(self.t("automation.loading"))
+        self.handoff_summary.setText("\n".join(lines))
+        set_tone(self.handoff_summary, summary_tone, palette)
+        self.handoff_summary.setVisible(bool(lines))
+        fill_table(self.handoff_table, rows, palette)
+        self.handoff_table.setVisible(bool(rows))
+
+        text, tone = "", None
+        if model.handoff_run_busy:
+            text = self.progress_text() or self.t("automation.handoff.working")
+        elif model.handoff_result is not None:
+            result = model.handoff_result
+            if not result.ok:
+                text, tone = self.failure_text(result), "danger"
+            else:
+                done = result.value
+                parts = [self.t(
+                    "automation.handoff.done", files=done.sync_actions, chats=done.session_actions,
+                )]
+                if done.taken:
+                    parts.append(self.t("automation.handoff.done.loaded", machine=", ".join(done.taken)))
+                if done.handed_off:
+                    parts.append(self.t("automation.handoff.done.handed_off"))
+                if done.chats_not_loaded:
+                    parts.append(self.p("automation.handoff.done.left", done.chats_not_loaded))
+                text = " ".join(parts)
+                tone = "attention" if done.chats_not_loaded else "ok"
+        self.handoff_status.setText(text)
+        set_tone(self.handoff_status, tone, palette)
+        self.handoff_status.setVisible(bool(text))
 
     def _render_copies(self) -> None:
         model = self.model

@@ -37,9 +37,12 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `guardian accept` | no | Take the current state as the new baseline after a real drop | [Guardian](GUARDIAN.md#accepting-a-new-baseline) |
 | `guardian scheduler` | no | Deprecated: use `automation apply` | [Configuration](CONFIGURATION.md#automation) |
 | `automation status` / `run` | no | Show the scheduled task, or run its safe job now | [Configuration](CONFIGURATION.md#automation) |
-| `automation apply` / `remove` | no | Make the OS tasks match `[scheduler]` and `[state_backup]`, or remove them | [Configuration](CONFIGURATION.md#automation) |
+| `automation apply` / `remove` | no | Make the OS tasks match `[scheduler]`, `[state_backup]` and `[handoff]`, or remove them | [Configuration](CONFIGURATION.md#automation) |
 | `state-backup create` | **yes** | Take one verified copy of `.codex`; `--wait` waits for Codex to close | [Configuration](CONFIGURATION.md#copies-of-codex) |
 | `state-backup list` | no | List the copies in `[state_backup] root_dir` | [Configuration](CONFIGURATION.md#copies-of-codex) |
+| `handoff status` | no | Which machine is working, what each handed off, what arrived here | [Synchronisation](SYNC.md#handing-work-over) |
+| `handoff sync` | **yes** | Load what other machines handed off, then hand off this one; stops on any conflict | [Synchronisation](SYNC.md#handing-work-over) |
+| `handoff watch` | **yes** | The watcher the task at sign-in runs: loads at start, hands off when Codex closes | [Synchronisation](SYNC.md#handing-work-over) |
 | `sessions scan` | no | Classify every session branch on both sides | [Sessions](SESSIONS.md) |
 | `sessions resolve` | no | Record one decision about a divergence | [Sessions](SESSIONS.md#divergences) |
 | `sessions apply` | **yes** | Transfer whole branches under one confirmed plan | [Sessions](SESSIONS.md#applying-a-plan) |

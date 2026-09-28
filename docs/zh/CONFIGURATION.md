@@ -59,6 +59,7 @@ temp_dir = "${workspace_root}/.tmp"
 | `[process_detection]` | 哪些进程意味着「Codex 在运行」 | [见下](#process_detection) |
 | `[scheduler]` | 计划执行的安全作业 | [见下](#自动化) |
 | `[state_backup]` | 登录后和/或每 N 小时制作 `.codex` 副本 | [见下](#codex-副本) |
+| `[handoff]` | 在电脑之间交接工作，以及监视器任务 | [同步](SYNC.md#在电脑之间交接工作) |
 | `[logging]` | 级别、格式、轮转、保留 | [见下](#日志) |
 | `[safety]` | 固定不变：Codex 必须已停止，不确定就中止 | 不可编辑 |
 | `[state]` | 同步清单放在哪里 | — |
@@ -261,4 +262,4 @@ max_file_size_mb = 10
 - 每一个危险动作都会单独记入日志：创建备份、覆盖、跳过。
 - `file` 必须位于 `.codex` 之外，`level` 必须是列出的取值之一。
 - `plan`、`sync`、`restore` 以及计划任务运行的命令（`guardian`、`preflight`、
-  `state-backup`）会写入这个文件。
+  `state-backup`、`handoff`）会写入这个文件。

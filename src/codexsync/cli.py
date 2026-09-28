@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 
 from .app import (
+    HandoffStatus,
+    handoff_status,
+    run_handoff,
+    watch_handoff,
     AutomationRun,
     AutomationView,
     apply_automation,
@@ -325,6 +329,22 @@ def print_automation_status(view: AutomationView) -> None:
             f"  backup_task: {backup.task_name}; last run {backup.last_run_utc or 'never'}; "
             f"last result {backup.last_result if backup.last_result is not None else 'none'}"
             + ("" if backup.definition_matches is not False else "; differs from config.toml")
+        )
+    print("Handoff between machines ([handoff] in config.toml)")
+    safe_print(f"  root_dir: {view.handoff_root if view.handoff_root is not None else '(not chosen)'}")
+    print(f"  enabled: {_yes_no(view.handoff_enabled)}")
+    print(f"  delivery_wait_minutes: {view.handoff_wait_minutes}")
+    print(f"  notify: {_yes_no(view.handoff_notify)}")
+    safe_print(f"  handoff_argv: {json.dumps(list(view.handoff_argv), ensure_ascii=False)}")
+    watcher = view.handoff_status
+    if watcher is None:
+        safe_print(f"  handoff_task: {view.handoff_status_error or 'the scheduler could not be asked'}")
+    elif not watcher.installed:
+        print("  handoff_task: not installed")
+    else:
+        safe_print(
+            f"  handoff_task: {watcher.task_name}; starts at sign-in"
+            + ("" if watcher.definition_matches is not False else "; differs from config.toml")
         )
     print("Operating system task")
     status = view.status
@@ -786,6 +806,37 @@ def build_parser() -> argparse.ArgumentParser:
     state_backup_list = state_backup_sub.add_parser("list", help="List the copies in the folder; writes nothing")
     state_backup_list.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
 
+    handoff = sub.add_parser(
+        "handoff",
+        help="Hand work from one machine to the next ([handoff] in config.toml)",
+    )
+    handoff_sub = handoff.add_subparsers(dest="handoff_command", required=True)
+    handoff_status_cmd = handoff_sub.add_parser(
+        "status", help="Say which machine is working, what it handed off and what arrived; writes nothing",
+    )
+    handoff_status_cmd.add_argument(
+        "--check-delivery", action="store_true",
+        help="Also hash the cloud copy to say how much of each pending handoff has arrived",
+    )
+    handoff_status_cmd.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+    handoff_sync = handoff_sub.add_parser(
+        "sync",
+        help="Load what other machines handed off, then hand off this one: settings and chats, "
+        "stopping on any conflict. Codex must be closed",
+    )
+    handoff_sync.add_argument(
+        "--wait-minutes", type=int, default=None,
+        help="Minutes to wait for another machine's handoff to arrive (default: handoff.delivery_wait_minutes)",
+    )
+    handoff_sync.add_argument(
+        "--accept-undelivered", action="store_true",
+        help="Load even if another machine's handoff has not fully arrived (only when you know it never will)",
+    )
+    handoff_sub.add_parser(
+        "watch",
+        help="Run until signed out: load at start, hand off whenever Codex closes (what the task runs)",
+    )
+
     history = sub.add_parser(
         "history", help="List past mutating runs (sync, sessions, ...) from their journals; writes nothing"
     )
@@ -1018,9 +1069,64 @@ def _print_history(runs) -> None:
         )
 
 
+def _handoff_record_json(record) -> dict | None:
+    if record is None:
+        return None
+    return {
+        "machine": record.machine,
+        "state": record.state,
+        "state_since_utc": record.state_since_utc,
+        "handoff_id": record.handoff_id,
+        "generation": record.generation,
+        "handed_off_at_utc": record.handed_off_at_utc,
+        "files": len(record.files),
+    }
+
+
+def _handoff_status_json(status: HandoffStatus) -> dict:
+    return {
+        "machine": status.machine,
+        "root": str(status.root),
+        "enabled": status.enabled,
+        "own": _handoff_record_json(status.own),
+        "others": [_handoff_record_json(record) for record in status.others],
+        "pending": list(status.pending),
+        "working_elsewhere": list(status.working_elsewhere),
+        "deliveries": [
+            {"machine": item.machine, "handoff_id": item.handoff_id, "total": item.total,
+             "arrived": item.arrived, "delivered": item.delivered}
+            for item in status.deliveries
+        ],
+        "unreadable": list(status.unreadable),
+    }
+
+
+def _print_handoff_status(status: HandoffStatus) -> None:
+    print(f"Handoff folder: {status.root}")
+    print(f"This machine: {status.machine}  (watcher {'on' if status.enabled else 'off'})")
+    records = ([status.own] if status.own is not None else []) + list(status.others)
+    if not records:
+        print("No machine has handed off yet.")
+    for record in records:
+        mark = "  (this machine)" if record.machine == status.machine else ""
+        state = "working since" if record.state == "working" else "handed off, idle since"
+        print(f"  {record.machine}{mark}: {state} {record.state_since_utc or '?'}")
+        if record.handoff_id:
+            print(f"    last handoff: {record.handed_off_at_utc or '?'}  ({len(record.files)} files)")
+    for machine in status.working_elsewhere:
+        print(f"WARNING: {machine} is working and has not handed off since.")
+    delivered = {item.machine: item for item in status.deliveries}
+    for machine in status.pending:
+        item = delivered.get(machine)
+        arrived = f" ({item.arrived} of {item.total} files arrived)" if item is not None else ""
+        print(f"Not loaded here yet: the handoff from {machine}{arrived}.")
+    for name in status.unreadable:
+        print(f"WARNING: {name} cannot be read and is ignored.")
+
+
 #: Commands a scheduled task runs besides `sync`, which also log to
 #: `logging.file` (`system_scheduler._JOB_SUBCOMMANDS`).
-_FILE_LOGGED_ONLY = frozenset({"guardian", "preflight", "state-backup"})
+_FILE_LOGGED_ONLY = frozenset({"guardian", "preflight", "state-backup", "handoff"})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1534,6 +1640,42 @@ def main(argv: list[str] | None = None) -> int:
                 for item in copies:
                     mark = "" if item.own else "  (another machine)"
                     print(f"{item.created_utc}  {item.size:>14} B  {item.name}{mark}")
+            return int(ExitCode.OK)
+
+        if args.command == "handoff":
+            if args.handoff_command == "status":
+                status = handoff_status(config_path, check_delivery=args.check_delivery)
+                if args.as_json:
+                    print(json.dumps(_handoff_status_json(status), sort_keys=True, indent=2))
+                else:
+                    _print_handoff_status(status)
+                return int(ExitCode.OK)
+            if args.handoff_command == "sync":
+                if args.wait_minutes is not None and args.wait_minutes < 0:
+                    raise ConfigError("--wait-minutes must be 0 or more")
+                result = run_handoff(
+                    config_path,
+                    origin="cli",
+                    wait_seconds=None if args.wait_minutes is None else args.wait_minutes * 60.0,
+                    accept_undelivered=args.accept_undelivered,
+                    on_wait=lambda late: print(
+                        "Waiting for the cloud: "
+                        + ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late)
+                    ),
+                )
+                print(f"Handoff finished on {result.machine}.")
+                print(f"  loaded from: {', '.join(result.taken) or 'nothing new'}")
+                print(f"  files written: {result.sync_actions}, chats written: {result.session_actions}")
+                if result.chats_not_loaded:
+                    print(
+                        f"  chats left in the cloud copy only: {result.chats_not_loaded} "
+                        "(codexSync cannot place them in Codex yet; `sessions scan` lists them)"
+                    )
+                print(
+                    "  handed off: " + (result.record.handoff_id if result.handed_off else "nothing new")
+                )
+                return int(ExitCode.OK)
+            watch_handoff(config_path)
             return int(ExitCode.OK)
 
         if args.command == "history":

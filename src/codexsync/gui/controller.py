@@ -108,6 +108,9 @@ from ..app import (
     DEFAULT_SCHEDULER_INTERVAL_SECONDS,
     MIN_SCHEDULER_INTERVAL_SECONDS,
     MAX_SCHEDULER_INTERVAL_SECONDS,
+    MAX_HANDOFF_DELIVERY_WAIT_MINUTES,
+    handoff_status,
+    run_handoff,
 )
 from ..exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .locations import find_workspaces as find_workspace_candidates
@@ -808,6 +811,23 @@ class Controller:
     def create_codex_backup(self, *, progress: ProgressCallback | None = None) -> Outcome:
         """One copy now. Refused while Codex is open: the window never waits for hours."""
         return run(lambda: create_codex_backup(self._config_path, wait=False, progress=progress))
+
+    # --- handing work between machines (CS-328) -------------------------------
+
+    def handoff(self) -> Outcome:
+        """Every machine's handoff as this one sees it. Reads only."""
+        return run(lambda: handoff_status(self._config_path))
+
+    def handoff_now(self, *, progress: ProgressCallback | None = None) -> Outcome:
+        """Load what others handed off, then hand off this machine.
+
+        The window never waits for the cloud: a handoff that has not arrived
+        is refused at once with how much of it has, and the watcher is the
+        one that waits.
+        """
+        return run(lambda: run_handoff(
+            self._config_path, origin="window", wait_seconds=0, progress=progress,
+        ))
 
     # --- guardian restore and project move ------------------------------------
 

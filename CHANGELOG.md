@@ -10,6 +10,20 @@ version through `codexsync.__version__`, which is read from installed package
 metadata.
 
 ### Added
+- **Handing work between machines** (`[handoff]`, `codexsync handoff
+  status|sync|watch`, `D-018`). Close Codex on one machine and it hands off:
+  settings and chats go to the cloud copy. Sign in on the other and it waits
+  for that handoff to arrive — checked from the files themselves, never from
+  the cloud client — loads it, and only then should Codex be started there.
+  One file per machine in the synced workspace says whether it is working or
+  has handed off and which handoffs it has loaded; ids decide, clocks are only
+  shown. Any conflict stops a handoff before its first write. An optional
+  fourth task starts the watcher at sign-in (it replaces the sync after
+  sign-in), reports with system notifications and warns when Codex is started
+  while another machine has not handed off. The *Automation* page shows every
+  machine and can hand off now. Chats are not yet placed into `.codex` on the
+  receiving machine (`PROVEN_LAYOUTS` is empty); a handoff says how many stayed
+  in the cloud copy instead of calling the work loaded.
 - **Copies of `.codex`** (`[state_backup]`, `codexsync state-backup create|list`,
   `D-017`). A zip copy of the valuable part of the Codex state directory —
   sessions, the archive, the global state, the SQLite catalogues, `config.toml`,
@@ -380,6 +394,13 @@ metadata.
 
 ### Fixed
 
+- The mouse wheel no longer changes a number or a drop-down it passes over, or
+  switches tabs, while scrolling *Settings* and *Automation*; a field takes the
+  wheel only after it has been clicked into.
+- The config upgrade card no longer shows a greyed-out *Update the
+  configuration* when there is nothing to write.
+- Python 3.11: importing the package failed (`ConfigFinding` had a mapping
+  proxy as a dataclass default, which only 3.12 accepts).
 - **A handoff between two machines could copy the older file over the newer
   one.** The sync manifest in the shared workspace held one baseline for all
   machines, so machine B took machine A's last sync for its own, read its own

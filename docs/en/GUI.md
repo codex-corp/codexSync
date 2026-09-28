@@ -264,6 +264,13 @@ removes what is off.
   after signing in and/or every N hours, how many to keep, the copies that
   exist, and **Make a copy now**, which is refused while Codex is open: the task
   is the one that waits.
+- **Handing work between machines** — the handoff folder, the watcher that
+  loads at sign-in and hands off when Codex closes, how long to wait for the
+  other machine's handoff, notifications; a table of every machine (working or
+  handed off, since when, and whether its last handoff was loaded here), and
+  **Sync and hand off now**, which does not wait for the cloud: a handoff that
+  has not fully arrived is refused. See
+  [Synchronisation → Handing work over](SYNC.md#handing-work-over).
 
 See [Configuration → Automation](CONFIGURATION.md#automation) and
 [Copies of `.codex`](CONFIGURATION.md#copies-of-codex).

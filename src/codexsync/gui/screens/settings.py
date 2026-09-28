@@ -691,8 +691,8 @@ class SettingsScreen(ConfigFormScreen):
             self.migration_diff.hide()
             self.migration_details_box.hide()
             self.migration_more.setVisible(False)
-            self.migration_toggle.setEnabled(False)
-            self.migration_apply.setEnabled(False)
+            self.migration_toggle.setVisible(False)
+            self.migration_apply.setVisible(False)
             return
         self.migration_summary.setText(
             self.p("settings.migration.summary", len(plan.findings))
@@ -706,15 +706,18 @@ class SettingsScreen(ConfigFormScreen):
         )
         for finding in plan.findings:
             self.migration_findings.addWidget(self._finding_row(finding))
-        self.migration_toggle.setEnabled(True)
+        # Nothing to write (only notes, or every change kept as it is) means
+        # nothing to show or apply: a greyed-out button promised an action
+        # that did not exist.
+        writable = bool(plan.fixable) and bool(diff)
+        self.migration_toggle.setVisible(writable)
         self.migration_toggle.setText(
             self.t("settings.migration.hide" if self.model.migration_open else "settings.migration.show")
         )
         self.migration_diff.setPlainText(diff)
-        self.migration_diff.setVisible(self.model.migration_open and bool(diff))
-        self.migration_apply.setEnabled(
-            bool(plan.fixable) and not self.model.migration_busy and bool(diff)
-        )
+        self.migration_diff.setVisible(writable and self.model.migration_open)
+        self.migration_apply.setVisible(writable)
+        self.migration_apply.setEnabled(writable and not self.model.migration_busy)
 
     def _finding_row(self, finding) -> QWidget:
         text = label(

@@ -272,3 +272,53 @@ filtering its keys would be a guess about a format codexSync does not own. The
 risk is accepted and written in the user documentation: the copy folder must
 be private. Links (symlinks and junctions) are not followed, and a folder that
 cannot be listed fails the copy rather than leaving a hole in it.
+
+## D-018: Handing work between machines, including chats, with nobody watching
+Asked for by the owner on 2026-09-27: the cold-sync protocol of `AI_RULES.md`
+§2 (close Codex, let the cloud deliver, sync, then start Codex elsewhere) as
+something codexSync does rather than something the user remembers, plus a
+record in the synced folder of who synced last. Decided with the owner: a
+background task rather than a tray window, operating-system notifications,
+and a 15-minute wait for delivery.
+
+What was decided:
+
+- **One file per machine** in `[handoff] root_dir`, inside the synced
+  workspace. Only its machine writes it, so a cloud client never has two
+  writers for one file. It is one self-verifying JSON document (like a
+  `semantic_store` entry): state (`working` / `handed_off`), the id of the last
+  handoff, a fingerprint of the cloud copy as that handoff left it (size and
+  SHA-256 per file, keyed by the SHA-256 of the path), and the id of every
+  other machine's handoff already loaded here.
+- **Ids, not clocks.** "Have I loaded A's work" compares ids. Two machines'
+  clocks are never compared (`AI_RULES` §6); times are recorded for people.
+- **Delivery is checked from files only.** Another machine's handoff counts as
+  arrived when every file its fingerprint names is in the cloud copy with that
+  size and hash. The cloud client is never asked (`AI_RULES` §1). A load waits
+  up to `delivery_wait_minutes` and then refuses; `--accept-undelivered` is
+  the explicit way past a handoff that will never fully arrive.
+- **Amendment to D-016: chats may be transferred unattended**, under one
+  condition that replaces the plan-id confirmation: the transfer plan has no
+  conflict, no target collision and no archive transition. The plan is built,
+  saved and applied by its own id in one process, so the freshness check that
+  `--confirm-plan` gives is kept. Anything that needs a person stops the whole
+  handoff before its first write — the chat plan is checked before the
+  settings sync runs. Recorded resolutions and the working set for the pair of
+  machines are used, because each is already a decision the person made.
+- **The handoff record is written only after both halves finished.** A new id
+  and fingerprint only when this machine wrote to the cloud copy; a run that
+  only loaded keeps its previous handoff, so other machines are not made to
+  wait for a "delivery" of what they already hold.
+- **The watcher** (`handoff watch`, `HANDOFF_SLOT`, no OS time limit) starts at
+  sign-in: it loads while Codex is closed, marks the machine `working` when
+  Codex starts (and warns when another machine is working or its handoff is not
+  loaded here), and hands off when Codex closes. Only a `RUNNING`/`STOPPED`
+  the process check is sure of counts; `UNKNOWN` is neither. It replaces the
+  sign-in sync (`scheduler.sync_at_login` together with `handoff.enabled` is a
+  config error). The process gate is not relaxed anywhere: every write inside a
+  handoff goes through the same gate, lock, journal and backup as `sync` and
+  `sessions apply`.
+- **Chats not placed in `.codex` are counted, not hidden.** While
+  `PROVEN_LAYOUTS` is empty no chat is written into `.codex`, so a load
+  reports how many newer chats stayed in the cloud copy only instead of
+  calling the work loaded.

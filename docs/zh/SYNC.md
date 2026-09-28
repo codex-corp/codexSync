@@ -124,6 +124,53 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
   不应清空另一侧的同一个文件夹；
 - 语义层拥有的路径永远不会以这种方式被删除。
 
+## 在电脑之间交接工作
+
+codexSync 所针对的流程是：在工作过的电脑上关闭 Codex，等待云端送达，在下一台电脑上
+同步，然后才在那里启动 Codex。**交接**完成这两次同步，并在两者之间检查送达情况：
+
+```toml
+[handoff]
+root_dir = "${workspace_root}/handoff"   # 位于同步的工作区内、云端副本旁边
+enabled = true                           # 下面的监视器任务
+delivery_wait_minutes = 15
+notify = true
+```
+
+```powershell
+codexsync -c config.toml handoff status                   # 谁在工作、交接了什么、什么已到达
+codexsync -c config.toml handoff status --check-delivery  # 同时对云端副本计算哈希
+codexsync -c config.toml handoff sync                     # 先载入，再交接；Codex 必须已关闭
+codexsync -c config.toml handoff watch                    # 登录任务运行的命令
+```
+
+交接是一次无人做决定的完整同步：设置按 `sync --apply --unattended` 的方式同步，
+聊天按 `sessions apply` 的方式同步，并且先检查聊天计划。**任何冲突——文件的或聊天的——
+都会在第一次写入之前停止交接**，聊天永远不会被合并。只有两部分都完成后，电脑才会记录这次交接。
+
+每台电脑在 `root_dir` 中保存一个小文件：它是在*工作*（看到 Codex 正在运行）还是已*交接*，
+最后一次交接的 id，交接时云端副本的指纹（每个文件的大小和 SHA-256，以路径的哈希为键——
+不写入任何路径或聊天 id），以及它已载入其他每台电脑的哪次交接。交接是否已载入由其 id
+决定，从不比较两台电脑的时钟；时间只是供你阅读。
+
+**监视器**（`enabled = true`）是一个登录时启动、直到注销前一直运行的任务：
+
+- 启动时如果 Codex 已关闭，它会载入另一台电脑交接的内容。如果云客户端尚未全部送达，它最多
+  等待 `delivery_wait_minutes`，然后放弃并告知你——只到达一半的内容不会被载入；
+- Codex 启动时，它把本机标记为工作中，如果另一台电脑仍在工作或其交接尚未在此载入，就会提醒你；
+- Codex 关闭时，它进行交接。
+
+它取代“登录后同步”：同时开启 `handoff.enabled` 和 `scheduler.sync_at_login` 属于配置错误。
+它会用系统通知（`notify`）报告所做的事，并且总是写入日志。带着打开的 Codex 关机的电脑会在
+下次登录时交接。
+
+`--accept-undelivered` 会载入一直未完整到达的交接——只有在你知道原因时才使用，例如它所列出的
+某个文件之后在云端副本中被手动修改过。
+
+**尚未支持：**聊天会进入云端副本，但不会放入另一台电脑的 `.codex`。Codex 期望聊天文件放在
+哪里尚未得到证实，因此任何把聊天写入 `.codex` 的操作都会被拒绝（见[会话](SESSIONS.md)）。
+交接会说明有多少聊天仅保留在云端副本中，而不是声称工作已载入。
+
 ## 历史
 
 每一次真正的同步都会留下一条操作日志，历史就是按从新到旧读取的这些日志——不需要另外维护记录：
@@ -135,7 +182,7 @@ codexsync -c config.toml history --json --limit 0
 ```
 
 每次运行都会显示开始时间、结果（失败时显示错误类型——绝不显示错误消息，因为其中可能含有文件名）、
-启动方（`window`、`cli`，或登录时任务对应的 `unattended`）、有多少文件传到云端、传到本地以及被删除，
+启动方（`window`、`cli`、登录时任务对应的 `unattended`，或交接监视器对应的 `handoff`）、有多少文件传到云端、传到本地以及被删除，
 以及它创建的备份。在这些字段出现之前写入的日志只显示总数。
 
 不会列出：不写入任何内容的试运行，以及在第一次写入前就停止的运行——Codex 已打开，或 `manual_abort`

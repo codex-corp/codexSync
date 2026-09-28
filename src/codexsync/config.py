@@ -11,6 +11,7 @@ from .jsonl_codec import parse_codec
 from .path_mapping import PathMappingRule
 from .process_knowledge import default_background_process_names, default_process_names
 from .models import (
+    MAX_HANDOFF_DELIVERY_WAIT_MINUTES,
     MAX_SCHEDULER_INTERVAL_SECONDS,
     MAX_STATE_BACKUP_INTERVAL_HOURS,
     MIN_SCHEDULER_INTERVAL_SECONDS,
@@ -19,6 +20,7 @@ from .models import (
     BackupConfig,
     ConflictConfig,
     FiltersConfig,
+    HandoffConfig,
     IdentityConfig,
     LoggingConfig,
     PathsConfig,
@@ -162,6 +164,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
     semantic_raw = _section(raw, "semantic")
     scheduler_raw = _section(raw, "scheduler")
     state_backup_raw = _section(raw, "state_backup")
+    handoff_raw = _section(raw, "handoff")
     path_mappings_raw = raw.get("path_mappings", [])
 
     identity = IdentityConfig(machine_id=identity_raw.get("machine_id"))
@@ -341,9 +344,11 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         state_backup=_parse_state_backup(
             state_backup_raw, base_dir=base_dir, workspace_root=workspace_root_dir
         ),
+        handoff=_parse_handoff(handoff_raw, base_dir=base_dir, workspace_root=workspace_root_dir),
     )
     _validate_config(cfg)
-    if "guardian" in raw:
+    if "guardian" in raw or cfg.handoff.enabled is True:
+        # A handoff file is named after this machine, like a Guardian snapshot.
         _require_guardian_identity(cfg)
     return cfg
 
@@ -502,6 +507,68 @@ def _validate_state_backup(cfg: AppConfig) -> None:
             raise ConfigError(f"state_backup.root_dir must not overlap {field_name}")
 
 
+def _parse_handoff(raw: Any, *, base_dir: Path, workspace_root: Path | None) -> HandoffConfig:
+    """Read `[handoff]` (CS-328). An empty or absent `root_dir` means no handoff."""
+    if not isinstance(raw, dict):
+        raise ConfigError("handoff must be a table")
+    defaults = HandoffConfig()
+    root_value = raw.get("root_dir", "")
+    if not isinstance(root_value, str):
+        raise ConfigError("handoff.root_dir must be a string path")
+    return HandoffConfig(
+        root_dir=_to_path(
+            root_value.strip(), "handoff.root_dir",
+            base_dir=base_dir, workspace_root=workspace_root, required=False,
+        ),
+        enabled=raw.get("enabled", defaults.enabled),
+        delivery_wait_minutes=raw.get("delivery_wait_minutes", defaults.delivery_wait_minutes),
+        notify=raw.get("notify", defaults.notify),
+    )
+
+
+def _validate_handoff(cfg: AppConfig) -> None:
+    settings = cfg.handoff
+    for field_name, value in (("handoff.enabled", settings.enabled), ("handoff.notify", settings.notify)):
+        if not isinstance(value, bool):
+            raise ConfigError(f"{field_name} must be a boolean (true or false, without quotes)")
+    wait = settings.delivery_wait_minutes
+    if isinstance(wait, bool) or not isinstance(wait, int):
+        raise ConfigError("handoff.delivery_wait_minutes must be an integer")
+    if not 0 <= wait <= MAX_HANDOFF_DELIVERY_WAIT_MINUTES:
+        raise ConfigError(
+            f"handoff.delivery_wait_minutes must be between 0 and {MAX_HANDOFF_DELIVERY_WAIT_MINUTES}"
+        )
+    if settings.enabled and cfg.scheduler.sync_at_login is True:
+        # The watcher loads at sign-in itself; two tasks would sync twice.
+        raise ConfigError(
+            "handoff.enabled and scheduler.sync_at_login are both on: the handoff watcher "
+            "already syncs at sign-in, so switch scheduler.sync_at_login off"
+        )
+    root = settings.root_dir
+    if root is None:
+        if settings.enabled:
+            raise ConfigError(
+                "handoff.root_dir is empty: choose a folder inside the synced workspace "
+                "before switching handoff on"
+            )
+        return
+    resolved = root.resolve()
+    if cfg.paths.local_state_dir and _paths_overlap(resolved, cfg.paths.local_state_dir.resolve()):
+        raise ConfigError("handoff.root_dir must be outside paths.local_state_dir")
+    protected = [
+        ("paths.backup_dir", cfg.paths.backup_dir),
+        ("paths.temp_dir", cfg.paths.temp_dir),
+        ("paths.cloud_root_dir", cfg.paths.cloud_root_dir),
+        ("guardian.root_dir", cfg.guardian.root_dir),
+        ("semantic.root_dir", cfg.semantic.root_dir),
+    ]
+    if cfg.state_backup.root_dir is not None:
+        protected.append(("state_backup.root_dir", cfg.state_backup.root_dir))
+    for field_name, other in protected:
+        if _paths_overlap(resolved, other.resolve()):
+            raise ConfigError(f"handoff.root_dir must not overlap {field_name}")
+
+
 def _validate_scheduler(scheduler: SchedulerConfig) -> None:
     for field_name, value in (
         ("scheduler.enabled", scheduler.enabled),
@@ -649,6 +716,7 @@ def _validate_config(cfg: AppConfig) -> None:
             raise ConfigError(f"{field_name} must be > 0")
     _validate_scheduler(cfg.scheduler)
     _validate_state_backup(cfg)
+    _validate_handoff(cfg)
     if cfg.semantic.max_jsonl_line_bytes < 1024 * 1024:
         raise ConfigError("semantic.max_jsonl_line_bytes must be at least 1 MiB")
     semantic_root = cfg.semantic.root_dir.resolve()
@@ -789,6 +857,8 @@ def external_roots(cfg: AppConfig) -> list[tuple[str, Path]]:
         roots.append(("state.manifest_file", cfg.state.manifest_file))
     if cfg.state_backup.root_dir is not None:
         roots.append(("state_backup.root_dir", cfg.state_backup.root_dir))
+    if cfg.handoff.root_dir is not None:
+        roots.append(("handoff.root_dir", cfg.handoff.root_dir))
     if cfg.logging.file:
         roots.append(("logging.file", cfg.logging.file))
     return roots
