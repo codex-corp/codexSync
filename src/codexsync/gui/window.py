@@ -63,7 +63,7 @@ from .screens.no_config import NoConfigScreen
 from .screens.sessions import SessionsModel, SessionsScreen
 from .screens.settings import SettingsModel, SettingsScreen
 from .screens.sync import SyncModel, SyncScreen
-from .widgets import JobRunner, install_wheel_guard
+from .widgets import JobRunner, button, install_wheel_guard, label, set_tone
 
 RESOURCES = Path(__file__).resolve().parent / "resources"
 APP_ICON = RESOURCES / "codexsync.ico"
@@ -199,6 +199,10 @@ class MainWindow(QMainWindow):
         self._activity_timer = QTimer(self)
         self._activity_timer.setInterval(1000)
         self._activity_timer.timeout.connect(self._update_activity)
+        #: What `config check` says about the open file, read when it is opened.
+        #: Drives the banner that offers the upgrade; never a gate -- the refusal
+        #: itself stays in core (`_require_mutation_compatible_config`).
+        self._config_check: Outcome | None = None
         self._load_config_info()
         stored_page = self._setting(SETTING_PAGE)
         if not controller.config_exists():
@@ -206,6 +210,7 @@ class MainWindow(QMainWindow):
         else:
             start = stored_page if stored_page in PAGES else "home"
         self._build(PAGES.index(start))
+        self._check_config()
 
         hints = QGuiApplication.styleHints()
         if hasattr(hints, "colorSchemeChanged"):
@@ -405,6 +410,7 @@ class MainWindow(QMainWindow):
         self._remember_config()
         self._load_config_info()
         self._build(self._stack.currentIndex())
+        self._check_config()
 
     def set_language(self, language: str) -> None:
         """Redraw every screen in another language, keeping what is shown."""
@@ -530,13 +536,98 @@ class MainWindow(QMainWindow):
                 screen = NoConfigScreen(self, self._models[page], page)
             self._screens[page] = screen
             self._stack.addWidget(screen)
-        row.addWidget(self._stack, stretch=1)
+        content = QWidget()
+        column = QVBoxLayout(content)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self._build_config_banner())
+        column.addWidget(self._stack, stretch=1)
+        row.addWidget(content, stretch=1)
 
         self.setCentralWidget(root)
         self._nav.currentRowChanged.connect(self._show_page)
         self._nav.setCurrentRow(page_index)
         self._show_page(page_index)
         self._update_status_bar()
+
+    # --- an outdated config ------------------------------------------------------
+
+    def _check_config(self) -> None:
+        """Read what `config check` says about the file just opened. Reads only.
+
+        Opening a config written by an earlier version must say so at once,
+        not when the first sync is refused with core's English sentence.
+        """
+        self._config_check = None
+        self._render_config_banner()
+        if not self._controller.config_exists():
+            return
+        controller = self._controller
+
+        def done(outcome: Outcome) -> None:
+            if self._controller is not controller:
+                return  # another file was opened meanwhile
+            self._config_check = outcome
+            self._render_config_banner()
+
+        self._jobs.start(lambda: controller.config_migration(), done)
+
+    def config_upgrade_plan(self):
+        """The migration plan to offer, or None when there is nothing to push.
+
+        Optional findings alone are not pushed: a person may have kept them on
+        purpose, and a banner on every start for that would be nagging. They
+        stay on the Settings card.
+        """
+        outcome = self._config_check
+        if outcome is None or not outcome.ok or not outcome.value:
+            return None
+        plan, diff = outcome.value
+        if plan.is_current or not diff:
+            return None
+        if not any(not finding.optional for finding in plan.fixable):
+            return None
+        return plan
+
+    def _build_config_banner(self) -> QWidget:
+        frame = QFrame()
+        frame.setObjectName("configBanner")
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(24, 12, 24, 12)
+        row.setSpacing(12)
+        self._banner_text = label(wrap=True)
+        row.addWidget(self._banner_text, stretch=1)
+        self._banner_button = button(self._catalog.text("banner.config.open"), primary=True)
+        self._banner_button.clicked.connect(self.offer_config_upgrade)
+        row.addWidget(self._banner_button)
+        self._banner = frame
+        self._render_config_banner()
+        return frame
+
+    def _render_config_banner(self) -> None:
+        if not hasattr(self, "_banner"):
+            return
+        plan = self.config_upgrade_plan()
+        self._banner.setVisible(plan is not None)
+        if plan is None:
+            return
+        blocked = bool(plan.blockers)
+        self._banner_text.setText(
+            self._catalog.text("banner.config.outdated" if blocked else "banner.config.differs")
+        )
+        set_tone(self._banner_text, "danger" if blocked else "attention", self.palette())
+
+    def offer_config_upgrade(self) -> None:
+        """Open the Settings card with this very plan, unfolded."""
+        if self.config_upgrade_plan() is None:
+            return
+        settings = self._models["settings"]
+        settings.migration = self._config_check
+        settings.migration_skip = set()
+        settings.migration_details = True
+        settings.migration_result = None
+        self.go_to("settings")
+        self._screens["settings"].render()
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()

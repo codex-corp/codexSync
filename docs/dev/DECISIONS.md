@@ -319,6 +319,160 @@ What was decided:
   handoff goes through the same gate, lock, journal and backup as `sync` and
   `sessions apply`.
 - **Chats not placed in `.codex` are counted, not hidden.** While
-  `PROVEN_LAYOUTS` is empty no chat is written into `.codex`, so a load
-  reports how many newer chats stayed in the cloud copy only instead of
-  calling the work loaded.
+  `PROVEN_LAYOUTS` is empty a chat this machine has never held is not written
+  into `.codex`, so a load reports how many newer chats stayed in the cloud
+  copy only instead of calling the work loaded. (Amended by D-019: a chat this
+  machine already holds is written in place.)
+
+## D-019: A continued chat is written over its own file without a proven layout
+Asked for by the owner on 2026-09-27 ("chats must sync, otherwise what is the
+point of syncing"), CS-330a. `PROVEN_LAYOUTS` gates every write into `.codex`
+because where the runtime looks for a session file cannot be learned from the
+files. For a chat this machine already holds that question is already
+answered: the runtime's thread catalogue (`threads.rollout_path`) names the
+file, and the file is there.
+
+What was decided:
+
+- **In place, and only in place.** A branch bound for `.codex` whose session
+  this machine already holds is written over that file (`IN_PLACE`, in the
+  item's codes and therefore in the plan id). No path is rendered, so no
+  layout is assumed. A session this machine has never held stays
+  `BLOCKED_UNPROVEN_LAYOUT` until the layout experiment settles it (CS-330b).
+- **The catalogue must name exactly that file for exactly that thread.** A
+  missing catalogue refuses here (`IN_PLACE_CATALOG_ABSENT`), unlike under a
+  proven layout where `ABSENT` constrains nothing: without a row nothing shows
+  that the runtime finds the chat by that file. Unreadable, unknown thread,
+  another path, a row without a path: refused, with the existing codes.
+- **No move hides inside it.** The two copies must both be active or both
+  archived, and the catalogue's archive flag must agree with the folder
+  (`IN_PLACE_STATE_CHANGES`, `IN_PLACE_ARCHIVE_FLAG_DIFFERS`); a move needs a
+  delete and `delete_policy` is `never`. A local branch in a compressed
+  container is refused (`IN_PLACE_CONTAINER`): the write produces plain JSONL.
+- **Nothing else changes.** A divergence is still a conflict; the old file is
+  in a verified backup before the replace; the process gate, lock and journal
+  are the `sessions apply` envelope. As for every session transfer,
+  `recover rollback` does not write the old bytes back (it would bypass the
+  catalogue and prefix checks); the old file stays in the backup snapshot, and
+  a branch displaced by a resolution also in its conflict bundle or
+  `superseded/`.
+
+Checked against the real state it was built on: the catalogue was readable
+(283 rows), and every one of 282 readable sessions satisfied the rule for its
+own file (path and archive flag agree); the one refused is a session id kept in
+two files, blocked as before.
+
+Residual risk, accepted and written in the user documentation: the catalogue
+also caches each chat's title, preview and time, and codexSync never writes
+it, so the chat list may show the old values until Codex refreshes them. The
+conversation is read from the file. Whether Codex rewrites a file merely
+because it was opened (CS-251) is asked by the same experiment as CS-330b.
+
+## D-020: A new chat may be written at its source path, on request
+Asked for by the owner on 2026-09-29 ("the point is to sync everything; in 0.1
+everything synced"), after D-019 had brought only chats both machines held. In
+0.1 `sessions/` was copied wholesale and the owner saw chats started on one
+machine appear in Codex on the other. That is evidence from an older Codex, not
+the controlled run `PROVEN_LAYOUTS` asks for, and the state it was checked
+against now argues for caution: `state_5.sqlite` has a `backfill_state` row
+marked `complete` since 2026-03-09, i.e. Codex filled its thread catalogue from
+the files once and may not look at the folder again.
+
+What was decided:
+
+- **A setting, not a gate entry.** `[semantic] new_chats = keep_in_cloud |
+  same_path`, default `keep_in_cloud` (unchanged behaviour). `same_path` builds
+  the plan under `SAME_PATH_LAYOUT_ID` (`{state}/{source_dir}/{file_name}`,
+  relative to `.codex`, so user name and drive do not matter). `PROVEN_LAYOUTS`
+  stays empty. Console, handoff and window read the same setting.
+- **Only for a chat this machine never held.** A chat it holds is still written
+  in place (D-019); the rendered path is never used for it.
+- **The one relaxed check is the missing catalogue row**
+  (`SESSION_NOT_IN_CATALOG`), because that row is exactly what Codex would have
+  to add. A catalogue that places the thread elsewhere or cannot be read still
+  refuses (`BLOCKED_UNSUPPORTED_BACKEND`); a file already at the target is
+  `DESTINATION_OCCUPIED`; no catalogue at all constrains nothing, as under a
+  proven layout. Every such item carries `NEW_CHAT_SAME_PATH`, which is in the
+  plan id.
+- **Visibility is measured, not assumed.** `doctor` gained `session_visibility`:
+  chat files on disk whose id the thread catalogue does not list, and ones it
+  lists at another path. On the state it was built on: 282 chats,
+  `not_listed=0`. A handoff reports how many new chats it wrote.
+- **Nothing is written into SQLite.** If Codex does not take the files up, the
+  next step is a decision about writing its catalogue, which stays the owner's.
+
+When the layout experiment (CS-330b) confirms the behaviour, the template moves
+into `PROVEN_LAYOUTS` with the Codex version it was observed on.
+
+## D-021: Compiled programs are never synced or copied
+Asked for by the owner on 2026-09-29, after `plugins/.plugin-appserver/`
+turned out to have carried `codex.exe`, `codex-command-runner.exe`, the sandbox
+setup and the code-mode host (416 MB) into the cloud copy: "there is no point
+copying binaries: they go out of date, a new install restores them, and
+programs update all the time".
+
+What was decided:
+
+- **A rule in code, not a glob.** `native_programs.is_native_program` reads a
+  file's header: Windows PE (`MZ` and the `PE` signature it points to, so a text
+  file starting with "MZ" is not caught), ELF, Mach-O in every byte order and
+  universal binaries. `runtime._build_indexes` drops such files from both sides
+  and `state_backup.select_state_files` leaves them out of a `.codex` copy,
+  whatever `include_roots`/`exclude_globs` say, like `SECRET_NAMES`.
+- **By header, not by name**, because a program on macOS and Linux usually has
+  no extension, and a Mac is exactly where a Windows `.exe` is useless.
+- **The Codex folders are also excluded by glob** (`CODEX_BINARY_GLOBS`,
+  `MISSING_EXCLUDE_CODEX_BINARIES` in `config check`), so the staging folder's
+  non-program files stay out too and a person reading the config sees why.
+
+Checked on the machine it was built on: 14 of 1334 files in the include roots
+are programs (4 Windows executables in `.plugin-appserver`, 10 prebuilt Node
+modules for Android, Linux and macOS in the plugin cache); none elsewhere.
+
+## D-022: The project list travels by merge, and one button syncs everything
+Asked for by the owner on 2026-10-01, after a sync on the laptop left its
+sidebar showing the laptop's own projects: "I want to open the laptop after a
+sync and carry on working; in 0.1 that worked". It worked because the 0.1
+config copied `.codex-global-state.json` whole (the cloud copy still holds that
+file from March). 0.2 made the file semantic-owned and carried nothing in its
+place, and the window's *Synchronise* ran only the settings sync, so neither
+chats nor projects moved.
+
+What was decided:
+
+- **Only the project part travels, by merge** (`project_sync.py`). The file
+  also holds one machine's window bounds, remote-control ids and per-host
+  migration markers, so copying it whole is wrong on the other machine. Each
+  machine publishes `local-projects` entries as Codex wrote them, the order,
+  the pins and the bindings (as legacy ids, which every machine shares; an
+  app-server id is per host) into `<manifest folder>/projects/<machine>.json`,
+  self-verifying like a handoff record. The receiver matches by id, then by
+  root through `[[path_mappings]]`, adds what it lacks as the peer's own entry
+  (nothing invented, which is why `supports_project_creation` does not apply),
+  and **never removes** a project (owner's choice: merge, not mirror).
+- **The peer's view wins for shared projects, once.** Pins, order and bindings
+  of projects both machines have follow the peer's publication, taken only
+  when its content id differs from the one recorded as accepted, so an
+  unchanged peer list is never re-applied over a local change.
+- **A missing folder does not stop the project** (owner's choice): it is added
+  with `FOLDER_MISSING_HERE` and the result says so.
+- **An empty project list commits to no shape.** The legacy adapter claims a
+  state with no projects and no bindings because there is nothing for the
+  Electron adapter to see; such a state takes the Electron shape every
+  observed machine writes, and the merged result is validated before commit.
+- **SQLite is not written.** On the reference machine `state_5.sqlite` holds
+  49 project rows (the same names three or four times from repeated
+  migrations) and every `threads.project_id` is NULL, while the sidebar follows
+  the JSON order and pins exactly. Whether a project *added* to the JSON after
+  `projectsMigrated: true` shows up has to be confirmed on the laptop; if it
+  does not, this meets `PROVEN_PROJECT_REGISTRY` (CS-238).
+- **Synchronise is the full sync.** The window's button runs what
+  `handoff sync` runs — settings, chats, projects, one confirmation, stages
+  reported as progress — and the handoff folder defaults to `handoff` beside
+  `state.manifest_file` ("we synced with the cloud — there is your folder"),
+  so there is nothing extra to choose.
+
+Checked against the real global state, in memory: the publication carries 19
+projects, 17 ordered, 2 pinned, 4 of 4 bindings; merging it into itself
+writes nothing; into a simulated laptop with 3 of them under other ids plus
+one of its own it adds 16, matches 3 by folder, and the result validates.

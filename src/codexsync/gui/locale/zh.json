@@ -92,6 +92,11 @@
   "failure.needs-a-decision": "这需要由你来做决定",
   "failure.stopped-safely": "操作已停止，未改动任何内容",
   "failure.unexpected": "发生了本不该发生的错误",
+  "failure.code.CONFIG_OUTDATED": "此配置由旧版 codexSync 写入。请在「设置」中点击「更新配置」进行更新：你的值和注释都会保留。",
+  "failure.code.CHAT_DECISIONS_NEEDED": "有些聊天在两台电脑上版本不同，需要你来决定；没有写入任何内容。请在「会话」页面做出选择，然后再次同步。",
+  "banner.config.outdated": "此配置由旧版 codexSync 写入，使用它时同步、聊天传输和恢复都不会写入任何内容。请更新它：你的值和注释会保留，旧文件会进入配置历史。",
+  "banner.config.differs": "此配置中的某些设置，本版本的写法不同。查看将要更改的内容并更新它。",
+  "banner.config.open": "查看并更新",
   "banner.reading": "正在读取环境…",
   "banner.stopped.title": "Codex 很可能已关闭",
   "banner.stopped.detail": "任何改动在写入之前仍会重新检查一次。",
@@ -125,6 +130,7 @@
   "check.codex_process": "Codex 进程",
   "check.session_catalog": "会话文件",
   "check.session_format": "会话记录格式",
+  "check.session_visibility": "Codex 列出的对话",
   "check.sqlite_audit": "线程目录（SQLite）",
   "check.session_index": "会话索引",
   "check.global_state_schema": "全局状态结构",
@@ -185,7 +191,7 @@
   "sync.conflicts.title": "有些文件在两侧都被改过",
   "sync.conflicts.detail": "在 manual_abort 策略下，同步会在写入任何内容之前停止。请手动处理这些文件，或在「设置」中更改冲突策略。",
   "sync.confirm.title": "现在开始同步？",
-  "sync.confirm.body": "Codex 必须处于关闭状态。计划会在此刻重新构建，每个将被覆盖的文件都会先备份，并在每次替换前重复进程检查。不会删除任何内容。",
+  "sync.confirm.body": "Codex 必须处于关闭状态。设置、聊天和项目会双向同步：计划在此刻重新构建，所有将被替换的内容都会先备份，并在每次替换前重复进程检查。不会删除任何内容。",
   "sync.running": "正在执行…",
   "sync.done.dry": "试运行结束。没有复制也没有写入任何内容。",
   "sync.tab.history": "历史",
@@ -226,6 +232,36 @@
   "overview.last_sync.none": "上次同步：尚未进行。",
   "overview.open_history": "历史",
   "sync.done.apply": "同步完成。",
+  "sync.decisions.title": "同步在写入任何内容之前停止了：有些聊天在两台电脑上版本不同，保留哪个只能由你决定。",
+  "sync.decisions.next": "打开「会话」：那里列出这些聊天，每个都可以选择，新格式也可以一次性全部接受。然后再次点击「同步」。",
+  "sync.decisions.open": "打开「会话」",
+  "sync.decisions.format_migrations": {
+    "other": "{count} 个聊天只是被 Codex 改写成了新格式——可以放心一次性接受"
+  },
+  "sync.decisions.held_migrations": {
+    "other": "{count} 个旧格式聊天包含更晚的消息——选择前请先查看"
+  },
+  "sync.decisions.divergences": {
+    "other": "{count} 个聊天在两台电脑上被不同地继续"
+  },
+  "sync.decisions.collisions": {
+    "other": "{count} 个聊天会落到本机已存在的文件上"
+  },
+  "sync.decisions.archive_moves": {
+    "other": "{count} 个聊天在其中一台电脑上被归档或取消归档"
+  },
+  "sync.count.chats": {
+    "other": "{count} 个聊天"
+  },
+  "sync.count.projects_added": {
+    "other": "新增 {count} 个项目"
+  },
+  "sync.note.missing_folders": {
+    "other": "有 {count} 个新增项目在本机没有对应文件夹：请创建文件夹或添加路径映射。"
+  },
+  "sync.note.chats_not_loaded": {
+    "other": "有 {count} 个聊天只留在云端副本中；原因见「会话」页面。"
+  },
   "association.BOUND": "已固定",
   "association.DERIVED": "按路径",
   "association.DERIVED_VIA_MAPPING": "仅按规则",
@@ -479,6 +515,10 @@
   "backups.restore.caption": "试运行会逐个文件与清单核对，并在不写入的情况下规划复制。真正的还原需要关闭 Codex，并且会先备份它将替换的一切。",
   "backups.restore.target": "还原到",
   "backups.restore.apply": "还原",
+  "backups.copies.caption": ".codex 中重要内容的完整副本——聊天、项目、目录、设置，绝不包含机密——打包成一个 zip 文件。仅在 Codex 关闭时创建；还原需手动进行。",
+  "backups.copies.folder": "文件夹：{folder}",
+  "backups.copies.no_folder": "尚未选择副本文件夹，因此副本功能处于关闭状态。请在「自动化」→「.codex 副本」中选择。",
+  "backups.copies.configure": "设置…",
   "backups.target.local": "本地 .codex",
   "backups.target.cloud": "云端镜像",
   "backups.select": "请选择一份备份。",
@@ -680,6 +720,7 @@
   "settings.field.backup.compression": "备份格式",
   "settings.field.semantic.root_dir": "会话存储",
   "settings.field.semantic.mirror_compression": "镜像压缩",
+  "settings.field.semantic.new_chats": "来自另一台机器的新对话",
   "settings.field.logging.level": "日志级别",
   "settings.field.logging.file": "日志文件",
   "settings.field.logging.format": "日志格式",
@@ -734,6 +775,7 @@
   "settings.hint.scheduler.sync_at_login": "一个单独的任务在登录后（等待上面的延迟之后）执行一次设置同步。Codex 打开时会被拒绝，任何冲突都会在写入前让它停止。会话、恢复和修复从不按计划运行。",
   "settings.hint.backup.max_backups": "0 表示不限。",
   "settings.hint.semantic.mirror_compression": "改动它会重命名镜像中的每个文件，并改变计划标识：执行之前请重新扫描。",
+  "settings.hint.semantic.new_chats": "「复制到 .codex」：本机从未有过的对话按它在另一台机器上的路径写入，与 0.1 相同。只有 Codex 自己接收该文件时才会显示；doctor 会报告它未列出的对话。",
   "settings.choice.sync.compare.mtime": "修改时间",
   "settings.choice.sync.compare.mtime_hash_fallback": "先看时间，不明确时用 SHA-256",
   "settings.choice.sync.equal_mtime_action.skip": "跳过",
@@ -752,6 +794,8 @@
   "settings.choice.semantic.mirror_compression.none": "不压缩",
   "settings.choice.semantic.mirror_compression.gzip": "gzip",
   "settings.choice.semantic.mirror_compression.xz": "xz（最小）",
+  "settings.choice.semantic.new_chats.keep_in_cloud": "留在云端副本",
+  "settings.choice.semantic.new_chats.same_path": "复制到 .codex（同 0.1）",
   "automation.task.title": "操作系统任务",
   "automation.task.caption": "自动化的设置保存在 config.toml 里；三个系统任务只是它们的生效形式。更新会让所有任务一致：开启的会安装，关闭的会删除。云端是否就绪不在检查之列，仍由你负责。",
   "automation.summary.disabled": "config.toml 中自动化处于关闭状态。",
@@ -977,6 +1021,9 @@
   "settings.hint.state_backup.keep": "本机的副本；最旧的副本只有在较新的副本校验通过后才会删除。",
   "settings.hint.scheduler.startup_delay_seconds": "适用于登录后运行的所有任务：安全任务、同步和副本。",
   "progress.phase.state_backup": "正在复制 .codex",
+  "progress.phase.sync_settings": "正在同步设置",
+  "progress.phase.sync_chats": "正在同步聊天",
+  "progress.phase.sync_projects": "正在同步项目",
   "home.codex.running": "Codex 已打开",
   "home.codex.stopped": "Codex 已关闭",
   "home.codex.unknown": "无法确定 Codex 是否打开",
@@ -1106,6 +1153,7 @@
   "settings.migration.finding.SESSION_MODE_LAST_DATE": "sync.session_mode = \"last_date_only\" 可能丢失分支，因此只允许生成计划，所有更改都会被拒绝。",
   "settings.migration.finding.DETECTION_LIST_OUTDATED": "配置中缺少此版本已知的 Codex 进程，它们的运行将完全无法被察觉：{names}",
   "settings.migration.finding.MISSING_EXCLUDE_SKILLS_SYSTEM": "{glob} 未被排除：Codex 会自行安装和删除这些技能，被它删除的文件会在每次运行时重新出现。",
+  "settings.migration.finding.MISSING_EXCLUDE_CODEX_BINARIES": "Codex 自己的程序未被排除（{globs}）：它们会被复制到云端和其他机器上，在其他平台上毫无用处，还会覆盖那台机器上安装的版本。",
   "settings.migration.finding.OBSOLETE_INCLUDE_ROOT": "这些路径属于会话和状态机制，永远不会被复制，列出它们不会改变任何事：{roots}",
   "settings.migration.finding.SCHEDULER_INTERVAL_TOO_SHORT": "scheduler.interval_seconds = {seconds} 短于最小值 {minimum} 秒；将改为 {minimum}。",
   "settings.migration.finding.SCHEDULER_INTERVAL_MIGRATED": "当前版本都不读取 scheduler.interval_minutes = {minutes}；相同的周期是 interval_seconds = {seconds}。",
@@ -1123,19 +1171,16 @@
   "notify.codex_open": "交接完成前 Codex 已被启动；此处未载入任何内容。",
   "notify.working_elsewhere": "{machine} 自 {since} 起一直在工作，尚未交接。请在那里关闭 Codex 并等待同步。",
   "notify.not_taken": "来自 {machine}（{since}）的工作尚未在此载入。请关闭 Codex，让 CodexSync 先载入。",
-  "notify.loaded_partial": "已载入来自 {machine} 的工作，但有 {count} 个聊天仍留在云端副本中：codexSync 目前还不能把聊天放入 Codex。",
+  "notify.loaded_partial": "已载入来自 {machine} 的工作，但有 {count} 个聊天仍留在云端副本中：在另一台电脑上新开的聊天，只有在「设置 › 同步」中把「来自另一台机器的新对话」设为复制时才会放入 Codex。",
   "sync.history.origin.handoff": "交接监视器",
-  "settings.field.handoff.root_dir": "交接文件夹",
   "settings.field.handoff.enabled": "自动交接",
   "settings.field.handoff.delivery_wait_minutes": "等待另一台电脑的交接（分钟）",
   "settings.field.handoff.notify": "显示系统通知",
-  "settings.hint.handoff.root_dir": "位于云客户端同步的文件夹内、云端副本旁边——不要放在云端副本里面。每台电脑在这里保存一个小文件，记录它最后交接的内容。",
   "settings.hint.handoff.enabled": "登录时启动的任务：载入另一台电脑交接的内容，并在 Codex 关闭时交接。取代“登录后同步”。",
   "settings.hint.handoff.delivery_wait_minutes": "载入时等待云客户端送达另一台电脑文件的时长，超时后放弃并提示。",
   "settings.hint.handoff.notify": "用通知报告交接、拒绝和警告；无论如何都会写入日志。",
-  "automation.handoff.title": "在电脑之间交接工作",
-  "automation.handoff.caption": "在一台电脑上关闭 Codex：它会交接——设置和聊天进入云端副本。在另一台电脑上登录：它会等待交接到达、载入，然后才应启动 Codex。任何冲突都会停止交接且不写入任何内容。聊天会上传到云端副本，但暂时不会放入另一台电脑的 Codex：在备用电脑上验证之前，codexSync 不知道 Codex 期望它们放在哪里。",
-  "automation.handoff.no_folder": "请选择交接文件夹以使用交接。",
+  "automation.handoff.title": "退出和登录时同步",
+  "automation.handoff.caption": "在一台机器上关闭 Codex，它会自动同步：设置、聊天和项目上传到云端。在另一台机器上登录，它会等到这些内容全部到达，加载后再启动 Codex。任何冲突都会在写入之前停止同步。下面的按钮与「同步」页上的「同步」相同。",
   "automation.handoff.error": "无法向操作系统查询交接任务：{error}",
   "automation.handoff.off": "自动交接：关闭。下面的按钮可手动执行相同操作。",
   "automation.handoff.installed_but_off": "交接任务已安装，但在 config.toml 中处于关闭状态——请更新任务以删除它。",
@@ -1160,14 +1205,17 @@
     "other": "{count} 个交接文件无法读取，已忽略。"
   },
   "automation.handoff.none": "还没有电脑进行过交接。",
-  "automation.handoff.now": "立即同步并交接",
+  "automation.handoff.now": "立即同步",
   "automation.handoff.working": "正在交接…",
-  "automation.handoff.confirm.title": "立即同步并交接？",
-  "automation.handoff.confirm.body": "先载入其他电脑交接的内容，再把本机的设置和聊天放入云端副本。Codex 必须已关闭。任何冲突都会停止操作且不写入任何内容。尚未完整到达的交接会被拒绝，而不是等待。",
+  "automation.handoff.confirm.title": "立即同步？",
+  "automation.handoff.confirm.body": "加载其他机器放到云端的内容——设置、聊天和项目——然后把本机的内容放上去。Codex 必须处于关闭状态。任何冲突都会在写入之前停止。云端内容尚未完整到达时，不会等待，而是直接拒绝。",
   "automation.handoff.done": "完成：写入 {files} 个文件和 {chats} 个聊天。",
   "automation.handoff.done.loaded": "已载入来自 {machine} 的交接。",
   "automation.handoff.done.handed_off": "本机的工作已在云端副本中。",
   "automation.handoff.done.left": {
-    "other": "{count} 个聊天仅保留在云端副本中：codexSync 目前还不能把聊天放入 Codex。"
+    "other": "{count} 个聊天仅保留在云端副本中：在另一台电脑上新开的聊天，只有在「设置 › 同步」中把「来自另一台机器的新对话」设为复制时才会放入 Codex。"
+  },
+  "automation.handoff.done.new": {
+    "other": "{count} 个本机从未有过的聊天已复制到 Codex。请启动 Codex，然后 doctor 会显示它是否列出了这些聊天。"
   }
 }

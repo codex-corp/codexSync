@@ -298,6 +298,18 @@ class SessionsScreen(Screen):
     def _pair(self) -> tuple[str, str]:
         return self.source.currentText().strip(), self.target.currentText().strip()
 
+    def open_for(self, source: str, target: str) -> None:
+        """Show the chats waiting for a decision between these two machines.
+
+        Asked for by another page -- a full sync that stopped on chats names
+        the pair it was syncing, so the person lands on exactly those (CS-342).
+        """
+        self.source.setEditText(source)
+        self.target.setEditText(target)
+        self._pair_changed()
+        self.model.category = ""
+        self.scan()
+
     def _pair_changed(self, *_: object) -> None:
         """Another pair of machines was chosen: show the set stored for it."""
         if self.model.scope_busy or self.model.scope_pair == self._pair():

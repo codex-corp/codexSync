@@ -16,6 +16,14 @@ to be created at all, because sessions are excluded from generic mtime copying.
 So this experiment is what unlocks the *return* direction: taking a branch from
 the cloud copy back into a Codex state directory.
 
+Since `D-019` (CS-330a) one case of that direction no longer waits for it: a
+session this machine already holds is written over its own file, at the path
+the thread catalogue names (`IN_PLACE`). That chooses no path, so it needs no
+layout — but whether the runtime shows the continuation, and what its cached
+title, preview and time do meanwhile, is still an observation. Record it in the
+third table below; a chat that does not show its continuation means `IN_PLACE`
+must be switched off until it is understood.
+
 ## Why this cannot be settled by reading code
 
 A session file's path on the source machine records where that branch lived
@@ -188,3 +196,7 @@ contents.
 | Date | Codex version | OS | Chat folder present | Opened only: file changed? | Appended record types |
 |---|---|---|---|---|---|
 | _pending_ | | | | | |
+
+| Date | Codex version | OS | Replaced in place with a longer copy: continuation shown? | List title/preview/time refreshed |
+|---|---|---|---|---|
+| _pending_ | | | | |

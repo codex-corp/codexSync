@@ -137,6 +137,7 @@ codexsync -c config.toml config upgrade --confirm-plan <id>
 | `BACKUP_DISABLED` | 阻止写入 | `backup_before_overwrite = false` |
 | `DETECTION_LIST_OUTDATED` | 安全 | 你的列表里缺少本版本已知的 Codex 进程 |
 | `MISSING_EXCLUDE_SKILLS_SYSTEM` | 正确性 | 没有排除 `skills/.system/**` |
+| `MISSING_EXCLUDE_CODEX_BINARIES` | 正确性 | 没有排除 `plugins/` 下 Codex 自己的程序 |
 | `OBSOLETE_INCLUDE_ROOT` | 正确性 | 那些本来也不会被复制的包含路径 |
 | `SCHEDULER_INTERVAL_MIGRATED` | 正确性 | `interval_minutes` 已换算进 `interval_seconds` |
 | `LEGACY_SCHEDULER_KEYS` | 正确性 | 本版本忽略的调度键 |
@@ -220,7 +221,7 @@ codexsync -c config.toml automation apply             # 安装负责制作副本
   `thread_history_*`、`memories_*`、`goals_*`，连同它们的 `-wal`/`-shm`）、
   `session_index.jsonl`、`config.toml`、`AGENTS.md`、`rules`、`skills`、`memories`
   和 `automations`。**从不复制：**`auth.json`、`cap_sid`、`.sandbox-secrets` 以及其他
-  保存令牌的内容，也不复制缓存、日志、沙盒和临时文件。在开发所用的机器上，压缩前约
+  保存令牌的内容，也不复制缓存、日志、沙盒、临时文件和任何已编译的程序（安装程序会恢复它们）。在开发所用的机器上，压缩前约
   1.2 GB。Codex 自己的 `config.toml` 会被完整复制，其中可能含有 MCP 服务器的令牌
   （`env` 表、bearer 标头）：请把 `root_dir` 放在只有你能读取的位置，不要放在共享文件夹中。
 - **不跟随链接。** `.codex` 中的符号链接或 Windows 目录联接（`skills` 里常有指向其他

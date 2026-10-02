@@ -10,6 +10,20 @@ version through `codexsync.__version__`, which is read from installed package
 metadata.
 
 ### Added
+- **Projects travel between machines** (`codexsync projects sync`, `D-022`).
+  0.1 copied `.codex-global-state.json` whole; 0.2 stopped (it holds
+  per-machine values) and, until now, carried no project at all, so a laptop
+  kept its own sidebar after a sync. Each machine now publishes its project
+  list beside the sync manifest and the next one merges it in: projects
+  matched by id or folder, the missing ones added as Codex wrote them, nothing
+  removed, the other machine's pins and order taken once per new list. Part of
+  `handoff sync` and of *Synchronise* in the window, which now runs the full
+  sync — settings, chats and projects — and shows which stage it is in.
+- **A sync that stops on chats says why and leads to the decision.** It
+  lists what kind of decisions wait (only a newer record format, continued
+  differently, a file in the way, an archive move) in the window's language
+  and opens Sessions for exactly that pair of machines. *Backups* can also
+  make a copy of `.codex` now, the same job as on *Automation*.
 - **Handing work between machines** (`[handoff]`, `codexsync handoff
   status|sync|watch`, `D-018`). Close Codex on one machine and it hands off:
   settings and chats go to the cloud copy. Sign in on the other and it waits
@@ -21,9 +35,37 @@ metadata.
   fourth task starts the watcher at sign-in (it replaces the sync after
   sign-in), reports with system notifications and warns when Codex is started
   while another machine has not handed off. The *Automation* page shows every
-  machine and can hand off now. Chats are not yet placed into `.codex` on the
-  receiving machine (`PROVEN_LAYOUTS` is empty); a handoff says how many stayed
-  in the cloud copy instead of calling the work loaded.
+  machine and can hand off now. A chat started on the other machine is placed
+  into `.codex` on the receiving one only with `[semantic] new_chats =
+  "same_path"` (below); a handoff says how many it wrote and how many stayed in
+  the cloud copy instead of calling the work loaded.
+- **Opening a config from an earlier version says so at once.** The window checks
+  the file it opens (or starts with) and shows a banner above every page with
+  *Review and update*, which opens the upgrade card unfolded; a write refused for
+  an outdated value is said in the window's language (`ConfigOutdatedError`,
+  still exit 4) instead of quoting core's English sentence.
+- **Programs are never synced or copied** (`D-021`). A compiled program — Windows
+  PE, Linux ELF, macOS Mach-O, recognised by its header — is left out of `sync`
+  and of the `.codex` copies whatever the config says: it is built for one
+  platform and version, goes out of date, and an installer restores it.
+  `plugins/.plugin-appserver/**` and `plugins/.remote-plugin-install-staging/**`
+  are also excluded in the template: Codex
+  keeps `codex.exe`, the command runner and the sandbox setup there (416 MB on
+  the machine this was found on), which are useless on another platform and
+  would overwrite another Windows machine's own version. `config check` offers
+  the exclusion to an existing config (`MISSING_EXCLUDE_CODEX_BINARIES`).
+- **Chats started on another machine can be copied into `.codex`**
+  (`[semantic] new_chats = "same_path"`, `D-020`), at the path they have there
+  relative to `.codex`, as 0.1 did. Off by default; a file already at the path
+  is never overwritten. Codex lists such a chat only once it takes the file up
+  itself, so `doctor` reports `session_visibility`: how many chat files Codex's
+  catalogue does not list.
+- **A chat continued on the other machine reaches `.codex`** (`IN_PLACE`,
+  `D-019`). A session this machine already holds is written over its own file,
+  at the path Codex's thread catalogue names for it, so no layout has to be
+  proven. Only when the catalogue names exactly that file and the chat is
+  active on both machines or archived on both; the old file is backed up first,
+  as for every transfer. `sessions apply` and a handoff both do it.
 - **Copies of `.codex`** (`[state_backup]`, `codexsync state-backup create|list`,
   `D-017`). A zip copy of the valuable part of the Codex state directory —
   sessions, the archive, the global state, the SQLite catalogues, `config.toml`,

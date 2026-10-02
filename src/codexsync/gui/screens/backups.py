@@ -4,6 +4,11 @@ Only a snapshot whose committed manifest matches it is offered for restore; a
 legacy or damaged one is listed with the reason and cannot be picked here (the
 command line still accepts an explicit legacy id, on purpose, and only there).
 
+Below them sit the copies of `.codex` (`D-017`, CS-341): the same list and
+*Make a copy now* as on Automation, drawn from Automation's model, so a copy
+started on either page is one job both pages show. Where the copies go is
+chosen on Automation; this page only says whether a folder is set.
+
 A restore starts with a dry run, which verifies every file's hash against the
 manifest and plans the copy without writing. The real restore needs Codex
 closed, takes its own backup of whatever it is about to replace, and runs the
@@ -16,6 +21,7 @@ from PySide6.QtWidgets import QComboBox
 from ..controller import Outcome
 from ..widgets import Banner, Cell, button, card, fill_table, human_size, label, row, selected_data, set_tone, table
 from .base import Model, Screen
+from .automation import render_copies, start_copy
 from .guardian import _when
 
 
@@ -29,10 +35,14 @@ class BackupsModel(Model):
         self.action_busy = False
         self.action_kind = ""
         self.result: Outcome | None = None
+        #: `[state_backup] root_dir` as the config says (None: copies are off).
+        self.copies_folder: Outcome | None = None
+        self.copies_folder_busy = False
 
     def reset_plans(self) -> None:
         self.checked = None
         self.result = None
+        self.copies_folder = None
 
 
 class BackupsScreen(Screen):
@@ -78,9 +88,64 @@ class BackupsScreen(Screen):
         restore_inner.addWidget(self.status)
         self.body.addWidget(restore)
 
+        copies, copies_inner = card(self.t("automation.backup.title"))
+        copies_inner.addWidget(label(self.t("backups.copies.caption"), "muted", wrap=True))
+        self.copies_folder = label("", wrap=True)
+        copies_inner.addWidget(self.copies_folder)
+        self.copies_summary = label("", "muted", wrap=True)
+        copies_inner.addWidget(self.copies_summary)
+        self.copies_table = table([
+            self.t("automation.backup.column.created"),
+            self.t("automation.backup.column.size"),
+            self.t("automation.backup.column.machine"),
+            self.t("automation.backup.column.name"),
+        ])
+        self.copies_table.setMinimumHeight(120)
+        copies_inner.addWidget(self.copies_table)
+        self.copy_now = button(self.t("automation.backup.now"), primary=True)
+        self.copy_now.clicked.connect(lambda: start_copy(self.host))
+        self.copies_refresh = button(self.t("action.refresh"))
+        self.copies_refresh.clicked.connect(self.refresh_copies)
+        self.copies_configure = button(self.t("backups.copies.configure"))
+        self.copies_configure.clicked.connect(lambda: self.host.go_to("automation"))
+        copies_inner.addLayout(row(self.copy_now, self.copies_refresh, self.copies_configure))
+        self.copy_status = label("", wrap=True)
+        copies_inner.addWidget(self.copy_status)
+        self.body.addWidget(copies)
+
     def activated(self) -> None:
+        # Both read the working folder and the config, nothing of Codex's.
         if self.model.listing is None and not self.model.busy:
             self.refresh()
+        if self.model.copies_folder is None and not self.model.copies_folder_busy:
+            self.refresh_copies()
+
+    def refresh_copies(self) -> None:
+        """Which folder copies go to, and what is in it."""
+        model = self.model
+        if model.copies_folder_busy or not self.host.controller.config_exists():
+            return
+        model.copies_folder_busy = True
+        self.render()
+        controller = self.host.controller
+        automation = self.host.model("automation")
+
+        def go() -> Outcome:
+            folder = controller.codex_backup_folder()
+            if not folder.ok or folder.value is None:
+                return Outcome(value=(folder, None))
+            return Outcome(value=(folder, controller.codex_backups()))
+
+        def apply(model: BackupsModel, outcome: Outcome) -> None:
+            model.copies_folder_busy = False
+            if not outcome.ok:
+                model.copies_folder = outcome
+                return
+            model.copies_folder, copies = outcome.value
+            if copies is not None and not automation.copy_busy:
+                automation.copies = copies
+
+        self.read(go, apply)
 
     def refresh(self) -> None:
         if self.model.busy:
@@ -133,6 +198,7 @@ class BackupsScreen(Screen):
         self.run(lambda: controller.restore(snapshot_name=name, target=target, dry_run=dry_run), apply)
 
     def render(self) -> None:
+        self._render_copies()
         model = self.model
         palette = self.palette_
         self.refresh_button.setEnabled(not model.busy)
@@ -211,3 +277,39 @@ class BackupsScreen(Screen):
         self.status.setText(text)
         set_tone(self.status, tone, palette)
         self.status.setVisible(bool(text))
+
+    def _render_copies(self) -> None:
+        model = self.model
+        automation = self.host.model("automation")
+        exists = self.host.controller.config_exists()
+        folder = model.copies_folder
+        has_folder = folder is not None and folder.ok and folder.value is not None
+        if model.copies_folder_busy and folder is None:
+            text, tone = self.t("automation.loading"), None
+        elif folder is None:
+            text, tone = "", None
+        elif not folder.ok:
+            text, tone = self.failure_text(folder), "danger"
+        elif folder.value is None:
+            text, tone = self.t("backups.copies.no_folder"), "attention"
+        else:
+            text, tone = self.t("backups.copies.folder", folder=str(folder.value)), None
+        self.copies_folder.setText(text)
+        set_tone(self.copies_folder, tone, self.palette_)
+        self.copies_folder.setVisible(bool(text))
+        self.copy_now.setEnabled(exists and has_folder and not automation.copy_busy)
+        self.copies_refresh.setEnabled(exists and not model.copies_folder_busy and not automation.copy_busy)
+        if has_folder:
+            render_copies(self, automation, self.copies_summary, self.copies_table, self.copy_status)
+        else:
+            render_copies(self, _NoCopies(automation), self.copies_summary, self.copies_table, self.copy_status)
+        self.copies_table.setVisible(has_folder)
+
+
+class _NoCopies:
+    """The Automation model with its listing hidden: no folder, nothing to list."""
+
+    def __init__(self, automation) -> None:
+        self.copies = None
+        self.copy_busy = automation.copy_busy
+        self.copy_result = automation.copy_result

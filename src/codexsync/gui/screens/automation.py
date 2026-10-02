@@ -57,7 +57,6 @@ BACKUP_FIELDS: tuple[Field, ...] = (
     Field("state_backup", "keep", "int", 5, minimum=1, maximum=1000),
 )
 HANDOFF_FIELDS: tuple[Field, ...] = (
-    Field("handoff", "root_dir", "path", ""),
     Field("handoff", "enabled", "bool", False),
     Field("handoff", "delivery_wait_minutes", "int", 15, maximum=MAX_HANDOFF_DELIVERY_WAIT_MINUTES),
     Field("handoff", "notify", "bool", True),
@@ -299,26 +298,7 @@ class AutomationScreen(ConfigFormScreen):
 
     def create_copy(self) -> None:
         """One copy now; the page lists the folder again when it is done."""
-        model = self.model
-        if model.copy_busy:
-            return
-        model.copy_busy = True
-        model.copy_result = None
-        self.render()
-        controller = self.host.controller
-
-        def go(progress=None) -> Outcome:
-            made = controller.create_codex_backup(progress=progress)
-            return Outcome(value=(made, controller.codex_backups()))
-
-        def apply(model: AutomationModel, outcome: Outcome) -> None:
-            model.copy_busy = False
-            if not outcome.ok:
-                model.copy_result = outcome
-                return
-            model.copy_result, model.copies = outcome.value
-
-        self.host.run(self.page, go, apply, progress=True)
+        start_copy(self.host)
 
     def _task_codes(self) -> tuple[str, ...]:
         outcome = self.model.automation
@@ -615,12 +595,9 @@ class AutomationScreen(ConfigFormScreen):
 
     def _render_handoff_task(self, view) -> str:
         """One line on the watcher task, described from the draft and the OS."""
-        folder = str(self._value("handoff", "root_dir") or "").strip()
         wanted = bool(self._value("handoff", "enabled"))
         status = view.handoff_status if view is not None else None
         installed = status is not None and status.installed
-        if not folder:
-            return "attention" if wanted else "", self.t("automation.handoff.no_folder")
         if view is not None and view.handoff_status_error:
             return "danger", self.t("automation.handoff.error", error=view.handoff_status_error)
         if not wanted and not installed:
@@ -645,12 +622,9 @@ class AutomationScreen(ConfigFormScreen):
 
         exists = self.host.controller.config_exists()
         board = model.handoff
-        # The saved file decides, not the draft: the folder the core would
-        # use is the one on disk. A board that was read proves it is set.
-        saved_folder = bool(str(self._file_value(HANDOFF_FIELDS[0]) or "").strip()) or (
-            board is not None and board.ok
-        )
-        self.handoff_now.setEnabled(exists and saved_folder and not model.handoff_run_busy)
+        # The folder is the one beside the sync manifest (CS-335); nobody
+        # chooses it, so the button needs only a config.
+        self.handoff_now.setEnabled(exists and not model.handoff_run_busy)
         self.handoff_refresh.setEnabled(exists and not model.handoff_busy and not model.handoff_run_busy)
 
         rows = []
@@ -691,9 +665,7 @@ class AutomationScreen(ConfigFormScreen):
                 summary_tone = "attention"
             elif not records:
                 lines.append(self.t("automation.handoff.none"))
-        elif board is not None and not board.ok and saved_folder:
-            # Without a folder the task line already says what to do; the
-            # refusal behind it would only repeat that as an error.
+        elif board is not None and not board.ok:
             lines.append(self.failure_text(board))
             summary_tone = "danger"
         elif model.handoff_busy:
@@ -720,6 +692,8 @@ class AutomationScreen(ConfigFormScreen):
                     parts.append(self.t("automation.handoff.done.loaded", machine=", ".join(done.taken)))
                 if done.handed_off:
                     parts.append(self.t("automation.handoff.done.handed_off"))
+                if done.new_chats_written:
+                    parts.append(self.p("automation.handoff.done.new", done.new_chats_written))
                 if done.chats_not_loaded:
                     parts.append(self.p("automation.handoff.done.left", done.chats_not_loaded))
                 text = " ".join(parts)
@@ -730,58 +704,11 @@ class AutomationScreen(ConfigFormScreen):
 
     def _render_copies(self) -> None:
         model = self.model
-        palette = self.palette_
         exists = self.host.controller.config_exists()
         file_folder = str(self._file_value(BACKUP_FIELDS[0]) or "").strip()
         self.copy_now.setEnabled(exists and not model.copy_busy and bool(file_folder))
         self.copies_refresh.setEnabled(exists and not model.copy_busy and not model.copies_busy)
-        copies = model.copies
-        rows = []
-        if copies is not None and copies.ok:
-            listed = list(copies.value or [])
-            own = [item for item in listed if item.own]
-            for item in listed[:COPIES_SHOWN]:
-                rows.append([
-                    Cell(local_time(item.created_utc)),
-                    Cell(human_size(item.size)),
-                    Cell(item.machine if item.own else self.t("automation.backup.other_machine", machine=item.machine),
-                         muted=not item.own),
-                    Cell(item.name, muted=True),
-                ])
-            if own:
-                self.copies_summary.setText(self.p(
-                    "automation.backup.count", len(own),
-                    size=human_size(sum(item.size for item in own)),
-                    latest=local_time(own[0].created_utc),
-                ))
-            else:
-                self.copies_summary.setText(self.t("automation.backup.none"))
-        elif copies is not None:
-            self.copies_summary.setText(self.failure_text(copies))
-        else:
-            self.copies_summary.setText("")
-        self.copies_summary.setVisible(bool(self.copies_summary.text()))
-        fill_table(self.copies_table, rows, palette)
-
-        text, tone = "", None
-        if model.copy_busy:
-            text = self.progress_text() or self.t("automation.backup.working")
-        elif model.copy_result is not None:
-            result = model.copy_result
-            if not result.ok:
-                text, tone = self.failure_text(result), "danger"
-            else:
-                made = result.value
-                text = self.t(
-                    "automation.backup.done",
-                    name=made.path.name, files=made.files, size=human_size(made.bytes),
-                )
-                if made.pruned:
-                    text += " " + self.p("automation.backup.pruned", len(made.pruned))
-                tone = "ok"
-        self.copy_status.setText(text)
-        set_tone(self.copy_status, tone, palette)
-        self.copy_status.setVisible(bool(text))
+        render_copies(self, model, self.copies_summary, self.copies_table, self.copy_status)
 
     def _interval(self, seconds: int) -> str:
         if seconds % 3600 == 0:
@@ -789,3 +716,86 @@ class AutomationScreen(ConfigFormScreen):
         if seconds % 60 == 0:
             return self.p("common.minutes", seconds // 60)
         return self.p("common.seconds", seconds)
+
+
+def render_copies(screen, model: AutomationModel, summary, copies_table, status) -> None:
+    """The copies of `.codex` and the last "copy now", as Automation and Backups both show them.
+
+    Both pages draw from the one Automation model, so a copy started on one
+    shows as running on the other and its button is off there too.
+    """
+    palette = screen.palette_
+    copies = model.copies
+    rows = []
+    if copies is not None and copies.ok:
+        listed = list(copies.value or [])
+        own = [item for item in listed if item.own]
+        for item in listed[:COPIES_SHOWN]:
+            rows.append([
+                Cell(local_time(item.created_utc)),
+                Cell(human_size(item.size)),
+                Cell(item.machine if item.own else screen.t("automation.backup.other_machine", machine=item.machine),
+                     muted=not item.own),
+                Cell(item.name, muted=True),
+            ])
+        if own:
+            summary.setText(screen.p(
+                "automation.backup.count", len(own),
+                size=human_size(sum(item.size for item in own)),
+                latest=local_time(own[0].created_utc),
+            ))
+        else:
+            summary.setText(screen.t("automation.backup.none"))
+    elif copies is not None:
+        summary.setText(screen.failure_text(copies))
+    else:
+        summary.setText("")
+    summary.setVisible(bool(summary.text()))
+    fill_table(copies_table, rows, palette)
+
+    text, tone = "", None
+    if model.copy_busy:
+        text = screen.host.progress_text("automation") or screen.t("automation.backup.working")
+    elif model.copy_result is not None:
+        result = model.copy_result
+        if not result.ok:
+            text, tone = screen.failure_text(result), "danger"
+        else:
+            made = result.value
+            text = screen.t(
+                "automation.backup.done",
+                name=made.path.name, files=made.files, size=human_size(made.bytes),
+            )
+            if made.pruned:
+                text += " " + screen.p("automation.backup.pruned", len(made.pruned))
+            tone = "ok"
+    status.setText(text)
+    set_tone(status, tone, palette)
+    status.setVisible(bool(text))
+
+
+def start_copy(host) -> None:
+    """One copy of `.codex` now, kept on the Automation model whichever page asked."""
+    model = host.model("automation")
+    if model.copy_busy:
+        return
+    model.copy_busy = True
+    model.copy_result = None
+    controller = host.controller
+
+    def go(progress=None) -> Outcome:
+        made = controller.create_codex_backup(progress=progress)
+        return Outcome(value=(made, controller.codex_backups()))
+
+    def apply(model: AutomationModel, outcome: Outcome) -> None:
+        model.copy_busy = False
+        if not outcome.ok:
+            model.copy_result = outcome
+        else:
+            model.copy_result, model.copies = outcome.value
+        # The window redraws the Automation page; Backups shows the same.
+        host.screen("backups").render()
+
+    host.run("automation", go, apply, progress=True)
+    host.screen("automation").render()
+    host.screen("backups").render()

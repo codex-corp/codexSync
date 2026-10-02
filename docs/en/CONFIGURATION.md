@@ -151,6 +151,7 @@ still refused, so there is no half-migrated state to be left in.
 | `BACKUP_DISABLED` | blocks writes | `backup_before_overwrite = false` |
 | `DETECTION_LIST_OUTDATED` | safety | Codex processes this version knows are missing from your lists |
 | `MISSING_EXCLUDE_SKILLS_SYSTEM` | correctness | `skills/.system/**` is not excluded |
+| `MISSING_EXCLUDE_CODEX_BINARIES` | correctness | Codex's own programs under `plugins/` are not excluded |
 | `OBSOLETE_INCLUDE_ROOT` | correctness | include roots that are never copied anyway |
 | `SCHEDULER_INTERVAL_MIGRATED` | correctness | `interval_minutes` carried over to `interval_seconds` |
 | `LEGACY_SCHEDULER_KEYS` | correctness | scheduler keys this version ignores |
@@ -246,7 +247,8 @@ codexsync -c config.toml automation apply             # install the task that ta
   `goals_*`, with their `-wal`/`-shm`), `session_index.jsonl`, `config.toml`,
   `AGENTS.md`, `rules`, `skills`, `memories` and `automations`. **Never:**
   `auth.json`, `cap_sid`, `.sandbox-secrets` or anything else holding a token,
-  nor caches, logs, the sandbox and temporary files. About 1.2 GB before
+  nor caches, logs, the sandbox, temporary files or any compiled program
+  (an installer restores those). About 1.2 GB before
   compression on the machine this was built on. Codex's own `config.toml` is
   copied whole, and it can hold MCP server tokens (`env` tables, bearer
   headers): keep `root_dir` somewhere only you can read, and not in a shared

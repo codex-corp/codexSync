@@ -156,6 +156,7 @@ codexsync -c config.toml config upgrade --confirm-plan <id>
 | `BACKUP_DISABLED` | блокирует запись | `backup_before_overwrite = false` |
 | `DETECTION_LIST_OUTDATED` | безопасность | в ваших списках нет процессов Codex, о которых знает эта версия |
 | `MISSING_EXCLUDE_SKILLS_SYSTEM` | корректность | `skills/.system/**` не исключён |
+| `MISSING_EXCLUDE_CODEX_BINARIES` | корректность | программы самого Codex в `plugins/` не исключены |
 | `OBSOLETE_INCLUDE_ROOT` | корректность | пути, которые всё равно никогда не копируются |
 | `SCHEDULER_INTERVAL_MIGRATED` | корректность | `interval_minutes` перенесён в `interval_seconds` |
 | `LEGACY_SCHEDULER_KEYS` | корректность | ключи планировщика, которые эта версия игнорирует |
@@ -255,7 +256,8 @@ codexsync -c config.toml automation apply             # установить з�
   вместе с `-wal`/`-shm`), `session_index.jsonl`, `config.toml`, `AGENTS.md`,
   `rules`, `skills`, `memories` и `automations`. **Никогда:** `auth.json`,
   `cap_sid`, `.sandbox-secrets` и всё остальное, где лежит токен, а также кэши,
-  журналы, песочница и временные файлы. На машине, где это делалось, — около
+  журналы, песочница, временные файлы и любые программы (их восстанавливает
+  установщик). На машине, где это делалось, — около
   1,2 ГБ до сжатия. Собственный `config.toml` Codex копируется целиком, а в
   нём могут быть токены MCP-серверов (таблицы `env`, заголовки bearer):
   держите `root_dir` там, где его читаете только вы, и не в общей папке.

@@ -31,6 +31,7 @@ FIELDS = {
     "state.manifest_file": ("state", "manifest_file"),
     "state_backup.root_dir": ("state_backup", "root_dir"),
     "logging.file": ("logging", "file"),
+    "handoff.root_dir": ("handoff", "root_dir"),
 }
 
 

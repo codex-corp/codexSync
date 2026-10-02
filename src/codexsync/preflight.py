@@ -27,9 +27,9 @@ from .exceptions import FailSafeError
 from .mutation_journal import JournalStore
 from .runtime import _make_safety_gate
 from .safety_gate import OperationKind, ProcessState
-from .session_catalog import peek_record_formats, scan_sessions
+from .session_catalog import SessionCatalog, SessionState, peek_record_formats, scan_sessions
 from .session_index import SESSION_INDEX_FILE, parse_session_index
-from .sqlite_audit import audit_sqlite
+from .sqlite_audit import PlacementStatus, audit_sqlite, read_thread_placements
 from .project_registry import PROVEN_PROJECT_REGISTRY, registry_note
 from .state_locator import locate_state_dirs
 from .sync_engine import STAGE_DIR_PREFIXES
@@ -109,6 +109,7 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
                 "session_catalog", status,
                 f"sessions={len(catalog.descriptors)} invalid_or_ambiguous={invalid} graph_codes={len(catalog.codes)}",
             ))
+            checks.append(_check_session_visibility(local_dir, catalog))
         except Exception as exc:
             checks.append(PreflightCheckResult("session_catalog", "WARN", f"Session audit unavailable: {exc}"))
         checks.append(_check_session_format(local_dir, cloud_dir, cfg.semantic.max_jsonl_line_bytes))
@@ -253,6 +254,46 @@ def _check_session_format(local_dir: Path, cloud_dir: Path | None, max_line_byte
             "reports as FORMAT_MIGRATION conflicts: decide them with `sessions resolve --format-migrations`",
         )
     return PreflightCheckResult("session_format", "PASS", message)
+
+
+def _check_session_visibility(local_dir: Path, catalog: SessionCatalog) -> PreflightCheckResult:
+    """How many chat files here Codex's own catalogue does not list.
+
+    Codex shows a chat from its `threads` table, not from the folder, so a file
+    it has not taken up is a chat nobody sees. A chat written by
+    `[semantic] new_chats = "same_path"` lands exactly so until Codex picks it
+    up (D-020); this is what turns "it did not appear" into a number instead of
+    a silence. Only counts are reported: ids and titles are the user's.
+    """
+    placements = read_thread_placements(local_dir)
+    if placements.status is PlacementStatus.ABSENT:
+        return PreflightCheckResult(
+            "session_visibility", "PASS",
+            "No thread catalogue yet; Codex builds one from the chat files when it first starts",
+        )
+    if placements.status is not PlacementStatus.AVAILABLE:
+        return PreflightCheckResult(
+            "session_visibility", "WARN",
+            f"Thread catalogue unreadable ({','.join(placements.codes) or 'unknown'}); visibility not checked",
+        )
+    chats = [
+        item for item in catalog.descriptors
+        if item.session_id and item.state in {SessionState.ACTIVE, SessionState.ARCHIVED}
+    ]
+    unlisted = sum(1 for item in chats if not placements.knows(item.session_id))
+    elsewhere = sum(
+        1 for item in chats
+        if placements.knows(item.session_id)
+        and placements.placement_of(item.session_id) not in {None, item.relative_path}
+    )
+    detail = f"chats={len(chats)} not_listed={unlisted} listed_at_another_path={elsewhere}"
+    if unlisted or elsewhere:
+        return PreflightCheckResult(
+            "session_visibility", "WARN",
+            detail + "; Codex does not show these chats. If they were just transferred, start Codex "
+            "once and run doctor again; if they stay, Codex does not take up a chat file by itself",
+        )
+    return PreflightCheckResult("session_visibility", "PASS", detail)
 
 
 def _check_process_state(cfg: AppConfig, operation: OperationKind) -> PreflightCheckResult:

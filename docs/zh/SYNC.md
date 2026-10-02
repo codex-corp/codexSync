@@ -30,7 +30,7 @@ codexsync -c config.toml sync --apply      # 真正的同步
 include_roots = ["sessions", "session_index.jsonl", "skills", "plugins"]
 
 [filters]
-exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log", "skills/.system/**"]
+exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log", "skills/.system/**", "plugins/.plugin-appserver/**", "plugins/.remote-plugin-install-staging/**"]
 ```
 
 - `include_roots` 是相对于 `.codex`（以及镜像）的路径。模板里列出了 `sessions` 和
@@ -47,6 +47,15 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
 - `skills/.system/**` 被排除：这些技能由 Codex 运行时自己安装和删除。在
   `delete_policy = "never"` 下，它删掉的文件会在下一次运行时从镜像里恢复，然后再被
   删掉——因此这棵子树完全交给运行时。
+- **已编译的程序永远不会被同步**，无论 `include_roots` 和 `exclude_globs` 怎么写：
+  Windows 的 `.exe`/`.dll`、Linux 的 ELF、macOS 的 Mach-O。按文件头识别，因为在
+  macOS 和 Linux 上程序通常没有扩展名。程序只为一个平台、一个版本构建，会过时，
+  安装程序可以恢复它；来自另一台机器的副本在那里毫无用处，或者会用旧版本替换新版本。
+- `plugins/.plugin-appserver/**` 和 `plugins/.remote-plugin-install-staging/**`
+  同样被排除：Codex 在那里存放它自己的程序——`codex.exe`、command runner、沙箱安装程序——
+  按它自己的版本和平台构建。在 Mac 上它们毫无用处，在另一台 Windows 电脑上还会覆盖那里
+  安装的版本。插件本身位于 `plugins/cache/`，已被 `**/cache/**` 排除：Codex 会按自己的
+  配置重新安装它们。
 - 存放凭据的文件（`auth.json`、`cap_sid`、`.sandbox-secrets` 之类）永远不会被复制，
   无论位于哪个根下的哪一层；「设置」页面也永远不会把它们列出来供你加入同步。
 - `sync.session_mode = "last_date_only"` 会被拒绝：它可能丢掉分支。
@@ -131,7 +140,7 @@ codexSync 所针对的流程是：在工作过的电脑上关闭 Codex，等待�
 
 ```toml
 [handoff]
-root_dir = "${workspace_root}/handoff"   # 位于同步的工作区内、云端副本旁边
+root_dir = "${workspace_root}/handoff"   # 可选：留空即 state.manifest_file 旁边的 handoff 文件夹
 enabled = true                           # 下面的监视器任务
 delivery_wait_minutes = 15
 notify = true
@@ -167,9 +176,15 @@ codexsync -c config.toml handoff watch                    # 登录任务运行�
 `--accept-undelivered` 会载入一直未完整到达的交接——只有在你知道原因时才使用，例如它所列出的
 某个文件之后在云端副本中被手动修改过。
 
-**尚未支持：**聊天会进入云端副本，但不会放入另一台电脑的 `.codex`。Codex 期望聊天文件放在
-哪里尚未得到证实，因此任何把聊天写入 `.codex` 的操作都会被拒绝（见[会话](SESSIONS.md)）。
-交接会说明有多少聊天仅保留在云端副本中，而不是声称工作已载入。
+**聊天。**两台电脑都有的聊天——也就是在另一台电脑上继续过的聊天——会覆盖它自己的文件
+载入 `.codex`，路径正是 Codex 自己的目录为它记录的路径。在另一台电脑上新开的聊天只有在 `[semantic] new_chats = "same_path"` 时才会载入，路径与它在
+那台电脑上的相同；默认情况下它留在云端副本中（见[会话](SESSIONS.md#写入-codex)）。交接会说明
+它把多少新聊天写入了 Codex（Codex 是否列出它们由 `doctor` 显示），以及有多少聊天仅保留在
+云端副本中，而不是声称工作已载入。
+
+**项目。**最后合并项目列表：另一台电脑上的项目会加入本机，不会删除任何东西，两台电脑都有的
+项目的置顶和顺序以另一台电脑为准。参见[项目 → 机器之间的项目](PROJECTS.md#机器之间的项目)。
+窗口中的**同步**按钮运行的就是这同一次完整同步。
 
 ## 历史
 

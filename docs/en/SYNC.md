@@ -31,7 +31,7 @@ A plan built while Codex is open is marked `volatile` and is only a preview:
 include_roots = ["sessions", "session_index.jsonl", "skills", "plugins"]
 
 [filters]
-exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log", "skills/.system/**"]
+exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log", "skills/.system/**", "plugins/.plugin-appserver/**", "plugins/.remote-plugin-install-staging/**"]
 ```
 
 - `include_roots` are paths relative to `.codex` (and to the mirror). The
@@ -53,6 +53,18 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
   removes those skills itself. With `delete_policy = "never"` a file it deleted
   would be restored from the mirror on the next run, and deleted again — the
   tree is left to the runtime entirely.
+- **A compiled program is never synced**, whatever `include_roots` and
+  `exclude_globs` say: a Windows `.exe`/`.dll`, a Linux ELF file, a macOS
+  Mach-O file, recognised by its header since on macOS and Linux a program
+  usually has no extension. It is built for one platform and one version, it
+  goes out of date, and an installer restores it; a copy from another machine is
+  useless there or replaces a newer version with an older one.
+- `plugins/.plugin-appserver/**` and `plugins/.remote-plugin-install-staging/**`
+  are excluded as well, because Codex keeps its own programs there — `codex.exe`, the
+  command runner, the sandbox setup — built for its own version and platform.
+  On a Mac they are useless, and on another Windows machine they would overwrite
+  the version installed there. Plugins themselves are in `plugins/cache/`, which
+  `**/cache/**` already excludes: Codex installs them again from its own config.
 - A credential file (`auth.json`, `cap_sid`, `.sandbox-secrets` and the like)
   is never copied, at any depth under any root, and the Settings screen never
   offers one for inclusion.
@@ -151,7 +163,7 @@ there. A **handoff** does the two syncs and checks the delivery in between:
 
 ```toml
 [handoff]
-root_dir = "${workspace_root}/handoff"   # inside the synced workspace, beside the cloud copy
+root_dir = "${workspace_root}/handoff"   # optional: empty means "handoff" beside state.manifest_file
 enabled = true                           # the watcher task below
 delivery_wait_minutes = 15
 notify = true
@@ -198,11 +210,19 @@ machine that is shut down with Codex still open hands off at its next sign-in.
 when you know why, for example when a file it named was changed by hand in the
 cloud copy since.
 
-**Not yet:** chats go to the cloud copy, but they are not placed into `.codex`
-on the other machine. Where Codex expects a chat file is unproven, so every
-write of a chat into `.codex` is refused (see [Sessions](SESSIONS.md)). A
-handoff says how many chats stayed in the cloud copy only, rather than calling
-the work loaded.
+**Chats.** A chat both machines have — one you continued on the other machine —
+is loaded into `.codex` over its own file, at the path Codex's own catalogue
+names for it. A chat started on the other machine is loaded only with `[semantic] new_chats =
+"same_path"`, at the path it has there; by default it stays in the cloud copy
+(see [Sessions](SESSIONS.md#writing-into-codex)). A handoff says how many new
+chats it wrote into Codex — `doctor` then says whether Codex lists them — and
+how many stayed in the cloud copy only, rather than calling the work loaded.
+
+**Projects.** Last, the project list is merged: projects the other machine has
+are added here, nothing is removed, and the other machine's pins and order are
+taken for the projects both have. See
+[Projects → Projects between machines](PROJECTS.md#projects-between-machines).
+**Synchronise** in the window runs this same full sync.
 
 ## History
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import textwrap
 import unittest
@@ -265,6 +266,52 @@ class RunHandoffTests(_Workspace):
         # PROVEN_LAYOUTS is empty: the chat stays in the mirror, and says so.
         self.assertEqual(loaded.chats_not_loaded, 1)
 
+    def test_a_chat_continued_on_the_other_machine_is_loaded_in_place(self) -> None:
+        # CS-330a: both machines hold the chat, the laptop's catalogue names its
+        # file, and the continuation made on the desktop replaces that file.
+        session_id = "33333333-3333-3333-3333-333333333333"
+        desktop, desktop_codex = self.machine("desktop")
+        laptop, laptop_codex = self.machine("laptop")
+        self.session(desktop_codex, session_id, records=1)
+        here = self.session(laptop_codex, session_id, records=1)
+        connection = sqlite3.connect(laptop_codex / "state_5.sqlite")
+        try:
+            connection.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, archived INTEGER)")
+            connection.execute("INSERT INTO threads VALUES (?, ?, 0)", (session_id, str(here)))
+            connection.commit()
+        finally:
+            connection.close()
+        run_handoff(desktop)
+        run_handoff(laptop)
+
+        continued = self.session(desktop_codex, session_id, records=3)
+        run_handoff(desktop)
+        loaded = run_handoff(laptop)
+        self.assertEqual(loaded.chats_not_loaded, 0)
+        self.assertEqual(loaded.session_actions, 1)
+        self.assertEqual(here.read_bytes(), continued.read_bytes())
+        self.assertEqual(
+            [path.name for path in here.parent.iterdir()], [here.name], "one file for one chat"
+        )
+
+    def test_a_diverged_chat_stops_the_sync_naming_the_pair_and_the_kind(self) -> None:
+        # CS-342: the window needs to know which pair and what kind of decision.
+        from codexsync.exceptions import ChatDecisionsNeeded
+
+        session_id = "44444444-4444-4444-4444-444444444444"
+        desktop, desktop_codex = self.machine("desktop")
+        laptop, laptop_codex = self.machine("laptop")
+        self.session(desktop_codex, session_id, records=1)
+        run_handoff(desktop)
+        # The laptop holds a different history of the same chat.
+        path = self.session(laptop_codex, session_id, records=0)
+        path.write_bytes(path.read_bytes() + b'{"type": "event", "n": "laptop"}\n')
+        with self.assertRaises(ChatDecisionsNeeded) as caught:
+            run_handoff(laptop)
+        self.assertEqual((caught.exception.source, caught.exception.target), ("desktop", "laptop"))
+        self.assertEqual(caught.exception.divergences, 1)
+        self.assertIsInstance(caught.exception, ConflictError, "still exit 2 on the command line")
+
     def test_an_undelivered_handoff_is_waited_for_then_refused_with_nothing_written(self) -> None:
         desktop, desktop_codex = self.machine("desktop")
         laptop, laptop_codex = self.machine("laptop", delivery_wait_minutes=1)
@@ -333,12 +380,20 @@ class RunHandoffTests(_Workspace):
             run_handoff(laptop)
         self.assertFalse(self.handoff_root.exists())
 
-    def test_without_a_handoff_folder_there_is_no_handoff(self) -> None:
+    def test_without_a_handoff_folder_it_sits_beside_the_manifest(self) -> None:
+        # CS-335: the shared folder is already chosen; a second one is never asked for.
         config, _ = self.machine("laptop")
         text = config.read_text(encoding="utf-8").replace(f'root_dir = "{self.handoff_root.as_posix()}"', 'root_dir = ""')
         config.write_text(text, encoding="utf-8")
-        with self.assertRaises(ConfigError):
-            run_handoff(config)
+        self.assertEqual(handoff_status(config).root, self.workspace / "handoff")
+        run_handoff(config)
+        self.assertTrue((self.workspace / "handoff" / "laptop.json").is_file())
+
+    def test_without_a_handoff_folder_or_a_manifest_there_is_no_handoff(self) -> None:
+        config, _ = self.machine("laptop")
+        text = config.read_text(encoding="utf-8").replace(f'root_dir = "{self.handoff_root.as_posix()}"', 'root_dir = ""')
+        text = text.replace(f'manifest_file = "{(self.workspace / 'manifest.json').as_posix()}"', "")
+        config.write_text(text, encoding="utf-8")
         with self.assertRaises(ConfigError):
             handoff_status(config)
 
@@ -490,6 +545,7 @@ class HandoffConfigTests(_Workspace):
     def test_switching_on_without_a_folder_is_refused(self) -> None:
         config, _ = self.machine("laptop", enabled=True)
         text = config.read_text(encoding="utf-8").replace(f'root_dir = "{self.handoff_root.as_posix()}"', 'root_dir = ""')
+        text = text.replace(f'manifest_file = "{(self.workspace / 'manifest.json').as_posix()}"', "")
         config.write_text(text, encoding="utf-8")
         with self.assertRaisesRegex(ConfigError, "handoff.root_dir is empty"):
             load_config(config)

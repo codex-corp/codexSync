@@ -21,7 +21,9 @@ import uuid
 from codexsync.config_edit import config_history_dir, validate_config_text
 from codexsync.config_migrate import (
     BLOCKER,
+    CODEX_BINARY_GLOBS,
     DETECTION_LIST_OUTDATED,
+    MISSING_EXCLUDE_CODEX_BINARIES,
     LEGACY_SCHEDULER_KEYS,
     MISSING_EXCLUDE_SKILLS_SYSTEM,
     OBSOLETE_INCLUDE_ROOT,
@@ -84,6 +86,17 @@ class ZeroOneConfigTests(unittest.TestCase):
         cfg = validate_config_text(FIXTURE.read_text(encoding="utf-8"), path=FIXTURE)
         with self.assertRaises(ConfigError):
             _require_mutation_compatible_config(cfg)
+
+    def test_the_refusal_is_an_outdated_config_error_with_exit_code_4(self) -> None:
+        # A subclass of ConfigError, so the command line still exits 4, and a
+        # window can recognise it and offer the upgrade in its own language.
+        from codexsync.exceptions import ConfigOutdatedError
+
+        cfg = validate_config_text(FIXTURE.read_text(encoding="utf-8"), path=FIXTURE)
+        with self.assertRaises(ConfigOutdatedError) as caught:
+            _require_mutation_compatible_config(cfg)
+        self.assertIsInstance(caught.exception, ConfigError)
+        self.assertTrue(caught.exception.setting)
 
     def test_migrating_it_makes_it_usable_and_keeps_every_comment(self) -> None:
         text = FIXTURE.read_text(encoding="utf-8")
@@ -207,6 +220,31 @@ class PlanTests(unittest.TestCase):
         self.assertIn("skills", roots)
         # The template lists this one, so it is not an obsolete entry.
         self.assertIn("session_index.jsonl", roots)
+
+    def test_codex_programs_under_plugins_are_excluded_by_the_migration(self) -> None:
+        # The 0.1 template syncs `plugins`, where Codex keeps codex.exe and its
+        # helpers for its own version and platform.
+        text = FIXTURE.read_text(encoding="utf-8")
+        self.assertIn(MISSING_EXCLUDE_CODEX_BINARIES, inspect_config(text).codes())
+        migrated = render_migrated_text(text, inspect_config(text))
+        globs = tomllib.loads(migrated)["filters"]["exclude_globs"]
+        for glob in CODEX_BINARY_GLOBS:
+            self.assertIn(glob, globs)
+        self.assertIn("**/*.lock", globs, "the user's own exclusions are kept")
+        self.assertNotIn(MISSING_EXCLUDE_CODEX_BINARIES, inspect_config(migrated).codes())
+
+    def test_the_exclusion_actually_keeps_codex_programs_out_of_a_sync(self) -> None:
+        from codexsync.filters import PathFilter
+
+        globs = tomllib.loads(PACKAGED_TEMPLATE.read_text(encoding="utf-8"))["filters"]["exclude_globs"]
+        path_filter = PathFilter(globs)
+        for relative in (
+            "plugins/.plugin-appserver/codex.exe",
+            "plugins/.plugin-appserver/codex-command-runner.exe",
+            "plugins/.remote-plugin-install-staging/x/plugin.json",
+            "plugins/cache/openai-bundled/browser/1/node_modules/a.node",
+        ):
+            self.assertTrue(path_filter.is_excluded(relative), relative)
 
 
 class ApplyTests(unittest.TestCase):

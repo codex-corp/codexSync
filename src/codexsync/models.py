@@ -100,6 +100,10 @@ class LoggingConfig:
     machine_id: str | None = None
 
 
+#: Accepted values of `[semantic] new_chats`, the default first.
+NEW_CHATS_VALUES: tuple[str, ...] = ("keep_in_cloud", "same_path")
+
+
 @dataclass(slots=True, frozen=True)
 class SemanticConfig:
     root_dir: Path
@@ -107,6 +111,10 @@ class SemanticConfig:
     #: Container the cloud mirror stores a branch in. Only the mirror: a branch
     #: written into a directory the Codex runtime reads is always plain JSONL.
     mirror_compression: JsonlCodec = JsonlCodec.XZ
+    #: What a transfer does with a chat this machine has never held:
+    #: `keep_in_cloud` leaves it in the mirror, `same_path` writes it into
+    #: `.codex` at the path it has on its own machine (D-020).
+    new_chats: str = "keep_in_cloud"
 
 
 #: Jobs the scheduler may run. Every one of them is read-only towards the Codex

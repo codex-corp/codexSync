@@ -90,6 +90,7 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         Field("filters", "exclude_globs", "lines", []),
         Field("sync", "direction", "choice", "bidirectional", ("bidirectional", "to_cloud", "to_local")),
         Field("sync", "delete_policy", "choice", "never", ("never", "propagate")),
+        Field("semantic", "new_chats", "choice", "keep_in_cloud", ("keep_in_cloud", "same_path")),
         Field(
             "sync", "session_mode", "choice", "all", ("all", "last_date_only"),
             blocked=("last_date_only",),

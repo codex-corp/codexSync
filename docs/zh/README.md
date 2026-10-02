@@ -129,7 +129,7 @@ Codex 运行时的某些行为无法从它的文件中推知，只能观察。�
 
 | 什么 | 如何表现 | 实验 |
 |---|---|---|
-| 把传输过来的会话分支写*入* `.codex` | `BLOCKED_UNPROVEN_LAYOUT` | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
+| 把本机从未有过的会话写*入* `.codex`（本机已有的聊天会覆盖写入它自己的文件；`[semantic] new_chats = "same_path"` 会按来源路径写入新聊天） | `BLOCKED_UNPROVEN_LAYOUT` | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
 | 改写 `session_index.jsonl` | `UNPROVEN_CONSUMER_CONTRACT` | [session-index-contract](../dev/experiments/session-index-contract.md) |
 | 在 macOS 和 Linux 上检测 Codex | 平台不受支持，写入被拒绝 | [process-detector-macos](../dev/experiments/process-detector-macos.md) |
 | 存放在 `state_*.sqlite` 里的项目 | 搬移项目只改写 JSON；删除或合并项目根本不提供 | [project-registry-contract](../dev/experiments/project-registry-contract.md) |

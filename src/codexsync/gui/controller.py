@@ -37,6 +37,7 @@ import tomllib
 from typing import Any, Callable, TypeVar
 
 from ..app import (
+    session_pair_name,
     __version__,
     accept_guardian_baseline,
     apply_project_move_plan,
@@ -148,6 +149,13 @@ class Outcome:
     value: Any = None
     failure: Failure | None = None
     message: str = ""
+    #: What kind of refusal it is, when core names one (``ConfigOutdatedError``
+    #: says ``CONFIG_OUTDATED``). A window says a known kind in its own
+    #: language instead of quoting ``message``, which core writes in English.
+    code: str | None = None
+    #: Values core attached to that kind of refusal (counts, a machine pair),
+    #: for the window to say it in its own words and act on it.
+    details: Any = None
 
     @property
     def ok(self) -> bool:
@@ -194,11 +202,14 @@ def run(call: Callable[[], T]) -> Outcome:
     try:
         return Outcome(value=call())
     except ConfigError as exc:
-        return Outcome(failure=Failure.CONFIGURATION, message=str(exc))
+        return Outcome(failure=Failure.CONFIGURATION, message=str(exc), code=getattr(exc, "code", None))
     except SafetyPreconditionError as exc:
         return Outcome(failure=Failure.CODEX_NOT_STOPPED, message=str(exc))
     except ConflictError as exc:
-        return Outcome(failure=Failure.NEEDS_A_DECISION, message=str(exc))
+        return Outcome(
+            failure=Failure.NEEDS_A_DECISION, message=str(exc),
+            code=getattr(exc, "code", None), details=getattr(exc, "details", None),
+        )
     except FailSafeError as exc:
         return Outcome(failure=Failure.STOPPED_SAFELY, message=str(exc))
     except Exception as exc:  # noqa: BLE001 - reported as a bug, never swallowed
@@ -529,7 +540,7 @@ class Controller:
         def go() -> SessionScan:
             cfg = load_config(self._config_path)
             plans = self._plans_dir(cfg)
-            pair = f"{_file_safe(source_machine)}-{_file_safe(target_machine)}"
+            pair = session_pair_name(source_machine, target_machine)
             resolutions = plans / f"sessions-resolutions-{pair}.json"
             used = resolutions.is_file()
             scope = read_working_set(
@@ -807,6 +818,10 @@ class Controller:
     def codex_backups(self) -> Outcome:
         """Copies in `[state_backup] root_dir`, newest first. Names and sizes only."""
         return run(lambda: list_codex_backups(self._config_path))
+
+    def codex_backup_folder(self) -> Outcome:
+        """Where copies of `.codex` go, or ``None`` when they are off. Reads the config only."""
+        return run(lambda: load_config(self._config_path).state_backup.root_dir)
 
     def create_codex_backup(self, *, progress: ProgressCallback | None = None) -> Outcome:
         """One copy now. Refused while Codex is open: the window never waits for hours."""

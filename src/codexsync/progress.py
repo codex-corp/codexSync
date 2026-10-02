@@ -32,6 +32,10 @@ PHASES: tuple[str, ...] = (
     "sessions_cloud",
     "chats",
     "state_backup",
+    # A full sync (`run_handoff`) says which half it is in (CS-339).
+    "sync_settings",
+    "sync_chats",
+    "sync_projects",
 )
 
 

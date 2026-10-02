@@ -358,7 +358,7 @@ def rollback_operation(
 _BEFORE_COMMIT = frozenset({JournalState.PREPARED, JournalState.BACKED_UP})
 #: Families whose only write is `.codex-global-state.json`, through
 #: `app.commit_global_state`; they are rolled back through it too.
-_GLOBAL_STATE_FAMILIES = frozenset({"repair", "chats", "guardian-restore", "project-move"})
+_GLOBAL_STATE_FAMILIES = frozenset({"repair", "chats", "guardian-restore", "project-move", "project-sync"})
 #: Families whose files are rolled back through the restore envelope.
 _FILE_FAMILIES = frozenset({"sync", "restore"})
 _GLOBAL_STATE_FILE = ".codex-global-state.json"

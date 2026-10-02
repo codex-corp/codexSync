@@ -72,6 +72,14 @@ max_jsonl_line_bytes = 67108864
 # Changing this renames every mirror destination and so changes the plan id:
 # rescan and confirm the new id before applying.
 mirror_compression = "xz"
+# What a transfer does with a chat this machine has never held:
+#   keep_in_cloud  leave it in the cloud copy (nothing unproven is written);
+#   same_path      write it into the Codex state directory at the path it has
+#                  on the machine it came from, as 0.1 did. Codex shows it only
+#                  if it takes the file up itself; `doctor` counts the chats its
+#                  catalogue does not list (session_visibility).
+# A chat both machines already hold is continued in place either way.
+new_chats = "keep_in_cloud"
 
 [targets]
 # Relative paths under local_state_dir/cloud_state_dir included in sync
@@ -87,6 +95,10 @@ include_roots = [
 # "skills/.system/**": those skills are installed and removed by the Codex
 # runtime itself. With delete_policy = "never" a file it deleted there would
 # come back from the mirror on every run, so that tree is left to it entirely.
+# "plugins/.plugin-appserver/**" and "plugins/.remote-plugin-install-staging/**":
+# Codex's own programs (codex.exe, the command runner, the sandbox setup), put
+# there by Codex for its own version and platform. Copying them is useless on
+# another platform and would overwrite another machine's own version.
 exclude_globs = [
   "**/*.lock",
   "**/*.tmp",
@@ -97,6 +109,8 @@ exclude_globs = [
   "**/__pycache__/**",
   "**/*.log",
   "skills/.system/**",
+  "plugins/.plugin-appserver/**",
+  "plugins/.remote-plugin-install-staging/**",
 ]
 
 [conflict]
@@ -253,7 +267,8 @@ keep = 5
 # Folder with one small file per machine saying what it last handed off. It
 # must be inside the folder your cloud client syncs, and outside the Codex
 # state directory, backup_dir, temp_dir, the cloud mirror, guardian.root_dir,
-# semantic.root_dir and state_backup.root_dir. Empty: no handoff.
+# semantic.root_dir and state_backup.root_dir. Empty: the "handoff" folder
+# beside state.manifest_file, which is already the shared one.
 root_dir = "${workspace_root}/handoff"
 # Install the background watcher that runs from sign-in: it loads at sign-in
 # and hands off whenever Codex closes. Replaces scheduler.sync_at_login.

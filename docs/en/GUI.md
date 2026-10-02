@@ -119,6 +119,10 @@ The cloud → local and local → cloud plan.
 - **Dry run** and **Synchronise** need Codex closed. The sync builds its plan
   again at the moment it writes, so what is on screen is never what gets
   applied.
+- **Synchronise** is the full sync: settings, then chats, then the project
+  list, with the stage it is in shown while it runs and what it did — files,
+  chats, projects added — when it ends. The plan and the dry run cover the
+  settings files.
 - Search, direction and folder filters change only what is shown: a sync always
   applies the whole plan.
 - Files changed on both sides are listed as conflicts and decided by
@@ -224,6 +228,12 @@ backup and a target (the local `.codex` or the cloud mirror), run the dry run,
 which verifies every file against the manifest; the restore itself unlocks only
 after that, needs Codex closed, and backs up whatever it replaces first.
 
+Those backups are taken by each write on its own, of what it is about to
+replace. A full copy of `.codex` is the block below them: **Copies of .codex**
+lists the copies in the folder and has **Make a copy now** (Codex closed). It
+is the same as on Automation and is one job for both pages; the folder is
+chosen there (**Set up…**). See [Copies of `.codex`](CONFIGURATION.md#copies-of-codex).
+
 See [Backups and recovery](RECOVERY.md).
 
 ## Recovery
@@ -264,12 +274,13 @@ removes what is off.
   after signing in and/or every N hours, how many to keep, the copies that
   exist, and **Make a copy now**, which is refused while Codex is open: the task
   is the one that waits.
-- **Handing work between machines** — the handoff folder, the watcher that
-  loads at sign-in and hands off when Codex closes, how long to wait for the
-  other machine's handoff, notifications; a table of every machine (working or
-  handed off, since when, and whether its last handoff was loaded here), and
-  **Sync and hand off now**, which does not wait for the cloud: a handoff that
-  has not fully arrived is refused. See
+- **Sync on sign-out and sign-in** — the watcher that loads at sign-in and
+  syncs when Codex closes, how long to wait for the other machine's work to
+  arrive, notifications; a table of every machine (working or handed off,
+  since when, and whether its last handoff was loaded here), and
+  **Synchronise now**, which does not wait for the cloud: work that has not
+  fully arrived is refused. There is no folder to choose: it is the
+  `handoff` folder beside the sync manifest. See
   [Synchronisation → Handing work over](SYNC.md#handing-work-over).
 
 See [Configuration → Automation](CONFIGURATION.md#automation) and
@@ -304,7 +315,10 @@ something blocks every write); it lists what would change and why, shows the
 exact difference, and
 applies it all in one confirmed write that keeps your comments and copies the
 replaced file into `config-history/`. An optional finding can be left alone with
-its own tick. See
+its own tick. You do not have to find this card: when you open or start with
+such a file, a banner above every page says so and **Review and update** opens
+the card unfolded (optional differences alone raise no banner). A write refused
+for this reason says the same in the window's language. See
 [Configuration → Upgrading a config from an earlier version](CONFIGURATION.md#upgrading-a-config-from-an-earlier-version).
 
 The language switch is at the top of the screen. The window itself remembers

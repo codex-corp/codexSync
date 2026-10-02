@@ -51,6 +51,7 @@ import zipfile
 
 from .exceptions import ConfigError, FailSafeError, SafetyPreconditionError
 from .fs_links import is_link
+from .native_programs import is_native_program
 from .guardian_models import normalize_machine_id
 from .models import AppConfig
 from .operation_lock import OperationLock
@@ -156,7 +157,8 @@ def _is_skipped(name: str) -> bool:
 def select_state_files(state_dir: Path) -> list[tuple[str, Path]]:
     """Every file a copy takes, as ``(relative path, absolute path)``, sorted.
 
-    Only listing: `iterdir`/`os.walk` and `lstat`. Links -- symlinks and
+    Listing (`iterdir`/`os.walk` and `lstat`), plus the first bytes of each
+    file to leave compiled programs out (D-021). Links -- symlinks and
     Windows junctions alike (``fs_links``) -- are not followed and not copied:
     a link inside `.codex` may point anywhere at all, and `skills` routinely
     holds junctions into folders outside it. A folder that cannot be listed
@@ -177,7 +179,8 @@ def select_state_files(state_dir: Path) -> list[tuple[str, Path]]:
         if is_link(entry, info):
             continue
         if stat.S_ISREG(info.st_mode):
-            chosen[name] = entry
+            if not is_native_program(entry):
+                chosen[name] = entry
             continue
         if not stat.S_ISDIR(info.st_mode):
             continue
@@ -195,6 +198,9 @@ def select_state_files(state_dir: Path) -> list[tuple[str, Path]]:
                 path = base / file_name
                 info = _lstat(path)
                 if is_link(path, info) or not stat.S_ISREG(info.st_mode):
+                    continue
+                # A program is reinstalled, never restored from a copy (D-021).
+                if is_native_program(path):
                     continue
                 chosen[relative] = path
     return sorted(chosen.items())

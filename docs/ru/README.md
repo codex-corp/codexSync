@@ -145,7 +145,7 @@ codexSync сообщает о случае, а не угадывает:
 
 | Что | Как это видно | Эксперимент |
 |---|---|---|
-| Запись перенесённой ветки сессии *внутрь* `.codex` | `BLOCKED_UNPROVEN_LAYOUT` | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
+| Запись *внутрь* `.codex` сессии, которой на этой машине никогда не было (чат, который уже есть, пишется поверх своего файла; `[semantic] new_chats = "same_path"` кладёт новый по пути источника) | `BLOCKED_UNPROVEN_LAYOUT` | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
 | Перезапись `session_index.jsonl` | `UNPROVEN_CONSUMER_CONTRACT` | [session-index-contract](../dev/experiments/session-index-contract.md) |
 | Определение Codex на macOS и Linux | платформа не поддерживается, запись закрыта | [process-detector-macos](../dev/experiments/process-detector-macos.md) |
 | Проекты в `state_*.sqlite` | перенос проекта меняет только JSON; удаление и объединение проектов не предлагаются | [project-registry-contract](../dev/experiments/project-registry-contract.md) |

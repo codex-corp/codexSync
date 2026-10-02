@@ -67,6 +67,40 @@ codexsync -c config.toml chats move --chat 3f9c2e71 --to Atlas --confirm <plan-i
   anything afterwards fails.
 - `--dry-run` runs every check and writes nothing.
 
+## Projects between machines
+
+Codex's sidebar — the projects, their order, which are pinned, and which chats
+an explicit binding puts under a project — is part of `.codex-global-state.json`.
+That file also holds things that belong to one machine (window position,
+remote-control ids, migration markers), so it is never copied whole. Instead
+each full sync carries the **project part** of it:
+
+- every machine publishes its project list into the `projects` folder beside
+  `state.manifest_file` (one self-verifying file per machine, written only by
+  that machine);
+- the next machine **merges** it in: a project is matched by id, then by its
+  folder (through [`[[path_mappings]]`](CONFIGURATION.md#path_mappings)); one
+  this machine lacks is added exactly as Codex wrote it on the other machine;
+- **nothing is removed** — a project only this machine has stays where it was;
+- for projects both machines have, the other machine's pins, order and chat
+  bindings win, but only from a list this machine has not taken yet, so an
+  unchanged list is never applied again over a change made here since;
+- a project whose folder does not exist on this machine is still added, and
+  the sync says so — create the folder or add a path mapping.
+
+It runs as part of `handoff sync` and of **Synchronise** in the window. By hand:
+
+```powershell
+codexsync -c config.toml projects sync                        # preview: what would be added, plan id
+codexsync -c config.toml projects sync --confirm-plan <id>    # Codex closed: merge, then publish this machine's list
+```
+
+The write goes through the same envelope as every other change to the global
+state: Codex closed, a verified backup first, and a rollback through
+[`recover`](RECOVERY.md#interrupted-mutations) if anything fails. Codex also
+keeps projects in `state_*.sqlite`, which codexSync never writes; the sidebar
+follows the JSON file.
+
 ## Repair after a machine handoff
 
 When a project folder moves — renamed, put on another drive, or opened on a second

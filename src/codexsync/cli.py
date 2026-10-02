@@ -8,6 +8,8 @@ from pathlib import Path
 
 from .app import (
     HandoffStatus,
+    ProjectSyncResult,
+    sync_projects,
     handoff_status,
     run_handoff,
     watch_handoff,
@@ -791,6 +793,26 @@ def build_parser() -> argparse.ArgumentParser:
     chats_move.add_argument("--source-machine", default=None)
     chats_move.add_argument("--target-machine", default=None)
 
+    projects_cmd = sub.add_parser(
+        "projects", help="Carry the project list between machines (also part of `handoff sync`)"
+    )
+    projects_sub = projects_cmd.add_subparsers(dest="projects_command", required=True)
+    projects_sync = projects_sub.add_parser(
+        "sync",
+        help=(
+            "Merge other machines' projects into this one and publish this machine's list; "
+            "without --confirm-plan it only previews"
+        ),
+    )
+    projects_sync.add_argument(
+        "--confirm-plan", default=None, help="Plan id from the preview; without it nothing is written",
+    )
+    projects_sync.add_argument(
+        "--dry-run", action="store_true",
+        help="With --confirm-plan: run every check, including the process gate, and write nothing",
+    )
+    projects_sync.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+
     state_backup = sub.add_parser(
         "state-backup",
         help="Copies of the valuable part of the Codex state directory ([state_backup] in config.toml)",
@@ -1099,6 +1121,64 @@ def _handoff_status_json(status: HandoffStatus) -> dict:
         ],
         "unreadable": list(status.unreadable),
     }
+
+
+def _project_sync_json(result: ProjectSyncResult) -> dict:
+    plan = result.plan
+    return {
+        "machine": result.machine,
+        "folder": str(result.root),
+        "plan_id": plan.plan_id,
+        "from_machines": list(result.pending),
+        "unreadable": list(result.unreadable),
+        "volatile": result.volatile,
+        "projects": [
+            {
+                "from": item.peer_machine,
+                "action": item.kind.value,
+                "name": item.name,
+                "project_id": item.local_project_id,
+                "roots": list(item.roots),
+                "codes": list(item.codes),
+            }
+            for item in plan.items
+        ],
+        "pins_changed": plan.pins_changed,
+        "order_changed": plan.order_changed,
+        "bindings_written": plan.bindings_written,
+        "written": result.written,
+        "published": result.published,
+    }
+
+
+def _print_project_sync(result: ProjectSyncResult, *, applied: bool) -> None:
+    plan = result.plan
+    print(f"Projects on {result.machine}, from: {', '.join(result.pending) or 'no new list from another machine'}")
+    for name in result.unreadable:
+        print(f"  not believed: {name}")
+    for item in plan.items:
+        if item.kind.value == "MATCHED" and not item.codes:
+            continue
+        codes = f"  [{', '.join(item.codes)}]" if item.codes else ""
+        print(f"  {item.kind.value:<9} {item.name or item.peer_project_id}  {'; '.join(item.roots)}{codes}")
+    print(
+        f"  added: {len(plan.added)}, already here: "
+        f"{sum(1 for item in plan.items if item.kind.value == 'MATCHED')}, left alone: {len(plan.ambiguous)}; "
+        f"pins {'change' if plan.pins_changed else 'kept'}, order {'changes' if plan.order_changed else 'kept'}, "
+        f"chat bindings: {plan.bindings_written}"
+    )
+    if applied:
+        print(f"  written: {result.written}; this machine's list published: {'yes' if result.published else 'unchanged'}")
+    else:
+        if not plan.writes:
+            print("  Nothing to change here.")
+        if result.volatile:
+            print("  Codex is running: this is a preview. Close Codex, preview again, then apply.")
+        print(f"  Plan id: {plan.plan_id}")
+        print(
+            f"  Apply with: codexsync projects sync --confirm-plan {plan.plan_id} "
+            "(also publishes this machine's list for the others)"
+        )
 
 
 def _print_handoff_status(status: HandoffStatus) -> None:
@@ -1557,6 +1637,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{label}. branches={written}")
             return int(ExitCode.OK)
 
+        if args.command == "projects":
+            result = sync_projects(config_path, confirm_plan=args.confirm_plan, dry_run=args.dry_run)
+            if args.as_json:
+                print(json.dumps(_project_sync_json(result), sort_keys=True, indent=2, ensure_ascii=False))
+            else:
+                _print_project_sync(result, applied=bool(args.confirm_plan) and not args.dry_run)
+            return int(ExitCode.OK)
+
         if args.command == "chats" and args.chats_command == "move":
             plan, written = move_chats(
                 config_path,
@@ -1666,10 +1754,24 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Handoff finished on {result.machine}.")
                 print(f"  loaded from: {', '.join(result.taken) or 'nothing new'}")
                 print(f"  files written: {result.sync_actions}, chats written: {result.session_actions}")
+                if result.new_chats_written:
+                    print(
+                        f"  chats new to this machine written into Codex: {result.new_chats_written} "
+                        "(start Codex, then `doctor` says whether it lists them: session_visibility)"
+                    )
                 if result.chats_not_loaded:
                     print(
                         f"  chats left in the cloud copy only: {result.chats_not_loaded} "
-                        "(codexSync cannot place them in Codex yet; `sessions scan` lists them)"
+                        "(`sessions scan` lists them; chats new to this machine are copied into Codex "
+                        'only with [semantic] new_chats = "same_path")'
+                    )
+                print(
+                    f"  projects added: {result.projects_added}, project list changes: {result.project_changes}"
+                )
+                if result.projects_missing_folders:
+                    print(
+                        f"  added projects whose folder does not exist here: {result.projects_missing_folders} "
+                        "(create the folder, or add a [[path_mappings]] rule)"
                     )
                 print(
                     "  handed off: " + (result.record.handoff_id if result.handed_off else "nothing new")

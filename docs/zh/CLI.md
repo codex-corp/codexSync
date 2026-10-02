@@ -48,6 +48,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `sessions index` | 否 | 报告两边的 `session_index.jsonl` 各有什么 | [会话](SESSIONS.md#会话索引) |
 | `chats list` / `chats tree` | 否 | 查找对话，看每个对话属于哪个项目 | [项目](PROJECTS.md#对话) |
 | `chats move` | **是** | 把选定的对话放到一个项目下 | [项目](PROJECTS.md#把对话移到某个项目) |
+| `projects sync` | **是** | 把其他电脑的项目列表合并到本机，再发布本机的列表（不带 `--confirm-plan` 时只是预览） | [项目](PROJECTS.md#机器之间的项目) |
 | `repair-projects scan` | 否 | 构建一份不可变的、带哈希的修复计划 | [项目](PROJECTS.md#换机之后的修复) |
 | `repair-projects apply` | **是** | 按标识执行某一份确切的计划 | [项目](PROJECTS.md#换机之后的修复) |
 | `project-move scan` | 否 | 为项目计算哈希，并规划复制到新文件夹 | [项目](PROJECTS.md#搬移项目的文件) |

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .config import PATH_SUBSTITUTIONS, load_config, preview_path
-from .progress import PHASES, ProgressCallback
+from .progress import PHASES, ProgressCallback, report as report_progress
 from .mapping_hints import MappingHints, build_mapping_hints
 from .sync_candidates import SyncCandidate, list_sync_candidates
 from .automation import AutomationView, apply_automation, automation_status, remove_automation
@@ -51,7 +51,7 @@ from .config_migrate import (
     render_migrated_text,
 )
 from .config import require_guardian_identity
-from .exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
+from .exceptions import ChatDecisionsNeeded, ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .backup import BackupManager
 from .manifest import build_manifest, load_manifest, save_manifest
 from .mutation_journal import JournalState, JournalStore, MutationJournal
@@ -67,7 +67,17 @@ from .models import (
     SyncPlan,
 )
 from .operation_lock import OperationLock
-from .path_mapping import mapping_digest
+from .path_mapping import PathMappingError, apply_path_mapping, mapping_digest
+from .project_sync import (
+    ProjectMergePlan,
+    ProjectSyncUnsupported,
+    RootMappingAmbiguous,
+    build_project_merge,
+    publication_from_state,
+    read_board as read_project_board,
+    serialise_state,
+    write_publication,
+)
 from .guardian_runner import GuardianRunner
 from .guardian_store import GuardianStore
 from .chat_directory import ChatDirectory, ChatEntry, ChatKind, build_chat_directory
@@ -148,9 +158,12 @@ from .semantic_transfer import (
     TransferAction,
     TransferPlan,
     FORMAT_MIGRATION,
+    OLDER_FORMAT_HAS_LATER_RECORDS,
+    NEW_CHAT_SAME_PATH,
     build_transfer_plan,
     descriptors_by_session_hash,
     format_migration_resolutions,
+    layout_for_new_chats,
     load_transfer_plan,
     local_folder_exists,
     mirror_codec_for,
@@ -874,6 +887,177 @@ def move_chats(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectSyncResult:
+    """What carrying the project list did, or would do (CS-333)."""
+
+    machine: str
+    root: Path
+    plan: ProjectMergePlan
+    #: Peer machines whose publication the plan takes.
+    pending: tuple[str, ...]
+    #: Publication files that were not believed, by name.
+    unreadable: tuple[str, ...]
+    #: Codex was running while this was read: a preview only.
+    volatile: bool = False
+    #: Changes written into the global state; 0 for a preview.
+    written: int = 0
+    #: Whether this machine's own publication was (re)written.
+    published: bool = False
+
+
+class ProjectsNotCarried(FailSafeError):
+    """This machine's project list cannot be merged: no global state, or an unknown shape."""
+
+
+def _coordination_dir(cfg: AppConfig) -> Path:
+    """The folder of files machines coordinate through: beside the sync manifest.
+
+    It already sits in the synced workspace and already may not overlap
+    `.codex`, the cloud copy, backups or temp, so nothing new is chosen.
+    """
+    manifest = cfg.state.manifest_file
+    if manifest is None:
+        raise ConfigError(
+            "state.manifest_file is empty: it names the shared folder machines coordinate through"
+        )
+    return manifest.parent
+
+
+def projects_root(cfg: AppConfig) -> Path:
+    return _coordination_dir(cfg) / "projects"
+
+
+def _root_mapper(cfg: AppConfig, machine: str) -> Callable[[str, str], str]:
+    rules = list(cfg.path_mappings)
+
+    def map_root(peer: str, root: str) -> str:
+        if not rules:
+            return root
+        try:
+            return apply_path_mapping(root, source_machine=peer, target_machine=machine, rules=rules).target_path
+        except PathMappingError as exc:
+            if str(exc) == "NO_MAPPING":
+                # Same path on both machines -- the usual case on one cloud drive.
+                return root
+            raise RootMappingAmbiguous(str(exc)) from exc
+
+    return map_root
+
+
+def _folder_exists(root: str) -> bool:
+    try:
+        return Path(root).is_dir()
+    except (OSError, ValueError):
+        return False
+
+
+def sync_projects(
+    config_path: Path,
+    *,
+    confirm_plan: str | None = None,
+    dry_run: bool = False,
+    gate: SafetyGate | None = None,
+) -> ProjectSyncResult:
+    """Preview or carry other machines' project lists into this one (CS-333).
+
+    Without ``confirm_plan`` this reads only. With it, Codex must be closed, the
+    plan is rebuilt from the state as it is now and its id must still match;
+    the merge is written through `commit_global_state` and this machine's own
+    publication is rewritten from the result, so the other machines take this
+    one's projects on their next sync.
+    """
+    cfg = load_config(config_path)
+    machine = _handoff_machine(cfg)
+    local_dir = locate_local_state_dir(cfg)
+    gate = gate if gate is not None else _make_safety_gate(cfg)
+    applying = confirm_plan is not None
+    if applying:
+        _require_mutation_compatible_config(cfg)
+        gate.require(OperationKind.PROJECT_SYNC)
+        volatile = False
+    else:
+        volatile = gate.check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
+
+    root = projects_root(cfg)
+    board = read_project_board(root)
+    for name, reason in sorted(board.unreadable.items()):
+        LOG.warning("project list %s is not believed: %s", name, reason)
+    pending = board.pending(machine)
+    source = local_dir / ".codex-global-state.json"
+    if not source.is_file():
+        raise ProjectsNotCarried(f"No Codex global state at {source}; there is no project list to merge into")
+    original = _read_live_state(source, config_path)
+    try:
+        plan, state = build_project_merge(
+            original, pending, machine=machine,
+            map_root=_root_mapper(cfg, machine), folder_exists=_folder_exists,
+        )
+    except ProjectSyncUnsupported as exc:
+        raise ProjectsNotCarried(f"Projects cannot be carried: {exc}") from exc
+    result = ProjectSyncResult(
+        machine=machine, root=root, plan=plan,
+        pending=tuple(item.machine for item in pending),
+        unreadable=tuple(sorted(board.unreadable)), volatile=volatile,
+    )
+    if not applying:
+        return result
+    if plan.plan_id != confirm_plan:
+        raise ConfigError(
+            "--confirm-plan must match the plan id from the preview; the state has changed "
+            "since then, so preview again and read what it now says"
+        )
+    for item in plan.ambiguous:
+        LOG.warning(
+            "project %s of %s left alone: %s", item.name or item.peer_project_id, item.peer_machine,
+            ", ".join(item.codes),
+        )
+    for item in plan.missing_folders:
+        LOG.warning("project %s added, but its folder does not exist here: %s", item.name, ", ".join(item.roots))
+    if dry_run:
+        LOG.info("project sync dry-run: plan %s would make %d change(s)", plan.plan_id, plan.action_count)
+        return result
+
+    written = 0
+    if plan.writes:
+        candidate = serialise_state(state)
+        report = validate_global_state_references(candidate)
+        if report.status not in {ValidationStatus.PASS, ValidationStatus.PASS_WITH_WARNING}:
+            raise FailSafeError("The merged project list would leave the global state invalid; nothing was written")
+        written = commit_global_state(
+            cfg, gate, OperationKind.PROJECT_SYNC,
+            family="project-sync", plan_id=plan.plan_id, action_count=plan.action_count,
+            state_root=local_dir, source=source, original=original, candidate=candidate,
+        )
+        LOG.info(
+            "projects: %d added, pins %s, order %s, %d chat binding(s) written",
+            len(plan.added), "changed" if plan.pins_changed else "kept",
+            "changed" if plan.order_changed else "kept", plan.bindings_written,
+        )
+    published = _publish_projects(root, board, machine, source, plan)
+    return replace(result, written=written, published=published)
+
+
+def _publish_projects(root: Path, board, machine: str, source: Path, plan: ProjectMergePlan) -> bool:
+    """Rewrite this machine's project list from the state as it now is.
+
+    Written only when something in it differs, so an unchanged machine does
+    not make every other one see a "new" list.
+    """
+    state = json.loads(source.read_bytes().decode("utf-8-sig"))
+    own = board.own(machine)
+    accepted = {**(own.accepted if own is not None else {}), **plan.taken}
+    publication = publication_from_state(state, machine, accepted=accepted)
+    if (
+        own is not None and own.publication_id == publication.publication_id
+        and own.accepted == publication.accepted
+    ):
+        return False
+    write_publication(root, publication)
+    LOG.info("published this machine's project list (%d project(s)) to %s", len(publication.projects), root)
+    return True
+
+
 def _one_project(directory: ChatDirectory, reference: str):
     matches = directory.project_named(reference)
     if not matches:
@@ -950,6 +1134,7 @@ def scan_session_transfer(
         resolutions=resolutions,
         confirmed_bases=_recorded_bases(cfg),
         placements=read_thread_placements(local_dir),
+        layout_id=layout_for_new_chats(cfg.semantic.new_chats),
         mirror_codec=cfg.semantic.mirror_compression,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=volatile,
@@ -1689,8 +1874,9 @@ HANDOFF_WATCH_POLL_SECONDS = 10.0
 
 
 #: Blocked actions that leave a newer chat in the mirror and not in `.codex`.
-#: Each is a standing limit (`PROVEN_LAYOUTS`, the SQLite thread catalogue),
-#: not a decision, so it does not stop a handoff -- but it is counted.
+#: Each is a standing limit (`PROVEN_LAYOUTS` unless `[semantic] new_chats`
+#: says otherwise, the SQLite thread catalogue), not a decision, so it does not
+#: stop a handoff -- but it is counted.
 _CHATS_LEFT_IN_THE_MIRROR = frozenset({
     TransferAction.BLOCKED_UNPROVEN_LAYOUT,
     TransferAction.BLOCKED_UNSUPPORTED_BACKEND,
@@ -1730,6 +1916,16 @@ class HandoffResult:
     #: there: no proven layout, or a thread the catalogue does not place.
     #: Reported, because "loaded" must not be said of work that stayed behind.
     chats_not_loaded: int = 0
+    #: Chats this machine never held that were written into `.codex` because
+    #: `[semantic] new_chats = "same_path"` (D-020). Codex shows them only once
+    #: it takes the files up, which `doctor` reports as `session_visibility`.
+    new_chats_written: int = 0
+    #: Projects another machine had that were added here (CS-333).
+    projects_added: int = 0
+    #: Changes written into the project list: added projects, pins, order, bindings.
+    project_changes: int = 0
+    #: Added projects whose folder does not exist on this machine.
+    projects_missing_folders: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1836,6 +2032,15 @@ def _handoff_source(board: Board, machine: str, pending: Sequence[HandoffRecord]
     return others[-1].machine if others else machine
 
 
+def session_pair_name(source_machine: str, target_machine: str) -> str:
+    """How files kept per pair of machines are named (plans, recorded decisions).
+
+    One function for the window and the full sync: decisions recorded on the
+    Sessions page are only found by the sync if both spell the pair alike.
+    """
+    return f"{_scope_file_safe(source_machine)}-{_scope_file_safe(target_machine)}"
+
+
 def run_handoff(
     config_path: Path,
     *,
@@ -1893,7 +2098,7 @@ def run_handoff(
     # the settings sync has written anything.
     source = _handoff_source(board, machine, pending)
     plans = _plans_dir(cfg)
-    pair = f"{_scope_file_safe(source)}-{_scope_file_safe(machine)}"
+    pair = session_pair_name(source, machine)
     resolutions = plans / f"sessions-resolutions-{pair}.json"
     resolutions_path = resolutions if resolutions.is_file() else None
     stored_scope = read_working_set(config_path, source_machine=source, target_machine=machine)
@@ -1909,18 +2114,42 @@ def run_handoff(
     unresolved = [item for item in plan.blocked_items if item.action in _UNRESOLVED_TRANSFER_BLOCKS]
     archive_moves = [item for item in plan.items if item.action is TransferAction.ARCHIVE_TRANSITION]
     if unresolved or archive_moves:
-        raise ConflictError(
-            f"{len(unresolved) + len(archive_moves)} chat(s) need a decision "
-            "(`sessions scan` shows which); nothing was written"
+        rewrites = [
+            item for item in unresolved
+            if item.action is TransferAction.BLOCKED_CONFLICT and FORMAT_MIGRATION in item.codes
+        ]
+        held = sum(1 for item in rewrites if OLDER_FORMAT_HAS_LATER_RECORDS in item.codes)
+        raise ChatDecisionsNeeded(
+            source=source, target=machine,
+            format_migrations=len(rewrites) - held,
+            held_migrations=held,
+            divergences=sum(
+                1 for item in unresolved
+                if item.action is TransferAction.BLOCKED_CONFLICT and FORMAT_MIGRATION not in item.codes
+            ),
+            collisions=sum(1 for item in unresolved if item.action is TransferAction.BLOCKED_TARGET_COLLISION),
+            archive_moves=len(archive_moves),
         )
     plan_path = plans / f"handoff-sessions-plan-{pair}.json"
     save_transfer_plan(plan, plan_path)
 
+    report_progress(progress, "sync_settings", 0, 0)
     ctx = build_context(config_path, enforce_safety=True, unattended=True)
     run_sync(ctx, dry_run=False, origin=origin)
+    report_progress(progress, "sync_chats", 0, 0)
     session_actions = apply_session_transfer(
         config_path, plan_path=plan_path, confirm_plan=plan.plan_id, resolutions_path=resolutions_path,
     )
+    # Projects last: a chat binding may name a chat the transfer just wrote.
+    # A merge never needs a person (an ambiguous project is left alone), so it
+    # is applied by its own id like the chat plan.
+    report_progress(progress, "sync_projects", 0, 0)
+    try:
+        project_preview = sync_projects(config_path)
+        projects = sync_projects(config_path, confirm_plan=project_preview.plan.plan_id)
+    except ProjectsNotCarried as exc:
+        LOG.warning("projects were not carried: %s", exc)
+        projects = None
     to_cloud = len(ctx.plan.to_cloud) + sum(
         1 for item in plan.items if item.action is TransferAction.FAST_FORWARD_REMOTE
     )
@@ -1937,9 +2166,17 @@ def run_handoff(
         f"handed off {record.handoff_id}" if handed_off else "nothing new to hand off",
     )
     left_behind = sum(1 for item in plan.blocked_items if item.action in _CHATS_LEFT_IN_THE_MIRROR)
+    new_chats = sum(
+        1 for item in plan.items
+        if item.action is TransferAction.FAST_FORWARD_LOCAL and NEW_CHAT_SAME_PATH in item.codes
+    )
     return HandoffResult(
         machine=machine,
+        projects_added=len(projects.plan.added) if projects else 0,
+        project_changes=projects.written if projects else 0,
+        projects_missing_folders=len(projects.plan.missing_folders) if projects else 0,
         chats_not_loaded=left_behind,
+        new_chats_written=new_chats,
         taken=tuple(item.machine for item in pending),
         sync_actions=ctx.plan.action_count,
         session_actions=session_actions,

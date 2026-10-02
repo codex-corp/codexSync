@@ -131,12 +131,42 @@ codexsync -c config.toml sessions apply --plan sessions-plan.json --confirm-plan
 ### 写入 `.codex`
 
 Codex 运行时到哪里去找会话文件，是那个运行时自己的属性：把文件放到别处，会话就会
-完全无声地消失。因此写*入* `.codex` 需要两样东西：
+完全无声地消失。因此写*入* `.codex` 走两条路之一。
 
-- **一个经过验证的目标布局。** 在受控实验把它记录下来之前，这样的条目会报告为
-  `BLOCKED_UNPROVEN_LAYOUT`（[实验](../dev/experiments/session-layout-adapter.md)，英文）；
-- **Codex 线程目录（`state_*.sqlite`）中恰好指向该文件的一行记录。** codexSync 不写
-  SQLite，因此目录从未听说过的会话无法被显示出来，会报告为 `UNSUPPORTED_STATE_BACKEND`。
+**本机已有的聊天**——也就是在另一台电脑上继续过的聊天——会覆盖写入它自己的文件
+（`IN_PLACE`）。Codex 线程目录（`state_*.sqlite`）记录着这个文件，因此不需要选择路径，
+也不必猜测布局：同一个聊天较新的副本（连同后续内容）替换较旧的副本，而较旧的副本会先
+进入经过校验的备份。只有当目录为这个聊天记录的恰好就是这个文件，并且聊天在两台电脑上
+同为活动或同为已归档时才允许。否则条目保持 `BLOCKED_UNPROVEN_LAYOUT`，并附上说明原因的
+代码：`IN_PLACE_CATALOG_ABSENT`、`SESSION_NOT_IN_CATALOG`、`CATALOG_PLACES_ELSEWHERE`、
+`CATALOG_UNREADABLE`、`IN_PLACE_STATE_CHANGES`、`IN_PLACE_ARCHIVE_FLAG_DIFFERS` 或
+`IN_PLACE_CONTAINER`。
+
+Codex 还在这个目录中保存每个聊天的标题、预览和时间，而 codexSync 从不写入它。因此在
+Codex 刷新之前，聊天列表可能仍显示旧值；对话本身则从文件读取。
+
+**本机从未有过的聊天**由一项设置决定：
+
+```toml
+[semantic]
+new_chats = "keep_in_cloud"   # keep_in_cloud | same_path
+```
+
+- `keep_in_cloud`（默认）让它留在云端副本中，报告为 `BLOCKED_UNPROVEN_LAYOUT`：
+  Codex 期望新聊天文件放在哪里，尚未经过[受控实验](../dev/experiments/session-layout-adapter.md)（英文）验证。
+- `same_path` 把它写入 `.codex`，路径与它在来源机器上相对于 `.codex` 的路径相同
+  （`sessions/<年>/<月>/<日>/…` 或 `archived_sessions/…`），这正是 0.1 整体复制
+  `sessions/` 时的做法。路径是相对的，所以用户名和盘符无关紧要。每个这样的条目都带有
+  `NEW_CHAT_SAME_PATH`。该路径上已有的文件永远不会被覆盖（`DESTINATION_OCCUPIED`）；
+  目录把该聊天放在别处或无法读取时，写入仍会被拒绝（`BLOCKED_UNSUPPORTED_BACKEND`）。
+
+Codex 从它的线程目录列出聊天，而 codexSync 不写这个目录，所以使用 `same_path` 时，
+新聊天只有在 Codex 自己接收该文件后才会出现。这在 0.1 时观察到过，但尚未在受控运行中
+验证，因此每次都会检查：启动 Codex 之后，`doctor` 报告 `session_visibility`——这里有多少
+聊天文件不在目录中。`not_listed=0` 表示所有聊天都可见。
+
+聊天的工作文件夹在本机上可能位于别处。文件不会因此被修改（记录的字节就是它的身份）；
+请用 `[[path_mappings]]` 映射文件夹，或移动项目，见[项目](PROJECTS.md)。
 
 写**向云文件夹**不受这道关卡限制：没有任何 Codex 读取那份副本，因此镜像中还没有的分支
 保留它在本地的相对路径。镜像中已有的分支则在原处被改写，即使本地副本放在别处——这里已归档，

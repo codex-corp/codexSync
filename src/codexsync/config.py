@@ -15,6 +15,7 @@ from .models import (
     MAX_SCHEDULER_INTERVAL_SECONDS,
     MAX_STATE_BACKUP_INTERVAL_HOURS,
     MIN_SCHEDULER_INTERVAL_SECONDS,
+    NEW_CHATS_VALUES,
     SCHEDULER_MODES,
     AppConfig,
     BackupConfig,
@@ -244,10 +245,16 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         mirror_compression = parse_codec(str(semantic_raw.get("mirror_compression", "xz")))
     except ValueError as exc:
         raise ConfigError(f"semantic.mirror_compression: {exc}") from exc
+    new_chats = str(semantic_raw.get("new_chats", "keep_in_cloud")).strip().lower()
+    if new_chats not in NEW_CHATS_VALUES:
+        raise ConfigError(
+            f"semantic.new_chats must be one of {', '.join(NEW_CHATS_VALUES)}, got {new_chats!r}"
+        )
     semantic = SemanticConfig(
         semantic_root,
         _int_value(semantic_raw, "max_jsonl_line_bytes", 64 * 1024 * 1024, "semantic.max_jsonl_line_bytes"),
         mirror_compression,
+        new_chats,
     )
 
     sync = SyncConfig(
@@ -344,7 +351,10 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         state_backup=_parse_state_backup(
             state_backup_raw, base_dir=base_dir, workspace_root=workspace_root_dir
         ),
-        handoff=_parse_handoff(handoff_raw, base_dir=base_dir, workspace_root=workspace_root_dir),
+        handoff=_parse_handoff(
+            handoff_raw, base_dir=base_dir, workspace_root=workspace_root_dir,
+            default_root=state.manifest_file.parent / "handoff" if state.manifest_file else None,
+        ),
     )
     _validate_config(cfg)
     if "guardian" in raw or cfg.handoff.enabled is True:
@@ -507,19 +517,28 @@ def _validate_state_backup(cfg: AppConfig) -> None:
             raise ConfigError(f"state_backup.root_dir must not overlap {field_name}")
 
 
-def _parse_handoff(raw: Any, *, base_dir: Path, workspace_root: Path | None) -> HandoffConfig:
-    """Read `[handoff]` (CS-328). An empty or absent `root_dir` means no handoff."""
+def _parse_handoff(
+    raw: Any, *, base_dir: Path, workspace_root: Path | None, default_root: Path | None = None,
+) -> HandoffConfig:
+    """Read `[handoff]` (CS-328).
+
+    An empty or absent `root_dir` means the `handoff` folder beside the sync
+    manifest (CS-335): that folder is already the shared one machines
+    coordinate through, so a person never has to pick a second one. The key
+    stays as an override.
+    """
     if not isinstance(raw, dict):
         raise ConfigError("handoff must be a table")
     defaults = HandoffConfig()
     root_value = raw.get("root_dir", "")
     if not isinstance(root_value, str):
         raise ConfigError("handoff.root_dir must be a string path")
+    root_dir = _to_path(
+        root_value.strip(), "handoff.root_dir",
+        base_dir=base_dir, workspace_root=workspace_root, required=False,
+    )
     return HandoffConfig(
-        root_dir=_to_path(
-            root_value.strip(), "handoff.root_dir",
-            base_dir=base_dir, workspace_root=workspace_root, required=False,
-        ),
+        root_dir=root_dir if root_dir is not None else default_root,
         enabled=raw.get("enabled", defaults.enabled),
         delivery_wait_minutes=raw.get("delivery_wait_minutes", defaults.delivery_wait_minutes),
         notify=raw.get("notify", defaults.notify),

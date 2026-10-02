@@ -16,8 +16,9 @@ import platform
 import sys
 import time
 
-from .exceptions import ConfigError
+from .exceptions import ConfigError, ConfigOutdatedError
 from .filters import PathFilter
+from .native_programs import is_native_program
 from .manifest import save_manifest
 from .models import AppConfig, FileMeta, SyncManifest, SyncPlan
 from .process_detector import CodexProcessDetector, ProcessInfo
@@ -114,18 +115,21 @@ MIGRATION_HINT = "run `config check` to see what this version would change, and 
 
 def _require_mutation_compatible_config(cfg: AppConfig) -> None:
     if cfg.process_detection.allow_terminate_if_running:
-        raise ConfigError(
+        raise ConfigOutdatedError(
             "process_detection.allow_terminate_if_running=true is no longer supported for mutation commands; "
-            f"codexSync never stops Codex. {MIGRATION_HINT}"
+            f"codexSync never stops Codex. {MIGRATION_HINT}",
+            setting="process_detection.allow_terminate_if_running",
         )
     if not cfg.backup.backup_before_overwrite:
-        raise ConfigError(
-            f"backup.backup_before_overwrite=false is not supported for mutation commands. {MIGRATION_HINT}"
+        raise ConfigOutdatedError(
+            f"backup.backup_before_overwrite=false is not supported for mutation commands. {MIGRATION_HINT}",
+            setting="backup.backup_before_overwrite",
         )
     if cfg.sync.session_mode == "last_date_only":
-        raise ConfigError(
+        raise ConfigOutdatedError(
             "sync.session_mode=last_date_only is incompatible with branch-preserving semantic mode. "
-            f"{MIGRATION_HINT}"
+            f"{MIGRATION_HINT}",
+            setting="sync.session_mode",
         )
 
 def _current_os_background_processes(cfg: AppConfig) -> list[str]:
@@ -205,7 +209,19 @@ def _build_indexes(cfg: AppConfig, local_dir: Path, cloud_dir: Path) -> tuple[di
     cloud_idx = scan_tree(cloud_dir, cfg.targets.include_roots, path_filter)
     local_idx = {rel: meta for rel, meta in local_idx.items() if _is_plain_copy_candidate(rel)}
     cloud_idx = {rel: meta for rel, meta in cloud_idx.items() if _is_plain_copy_candidate(rel)}
+    local_idx, cloud_idx = _without_programs(local_idx), _without_programs(cloud_idx)
     return _apply_session_mode(local_idx, cloud_idx, cfg.sync.session_mode)
+
+def _without_programs(index: dict[str, FileMeta]) -> dict[str, FileMeta]:
+    """The index without compiled programs, whatever the config says (D-021).
+
+    Each side is judged by its own copy, so a program that exists on one side
+    only is not seen as missing on the other: it is simply not part of the sync.
+    """
+    kept = {rel: meta for rel, meta in index.items() if not is_native_program(meta.abs_path)}
+    if len(kept) != len(index):
+        LOG.info("%d program file(s) left out of sync; an installer restores them", len(index) - len(kept))
+    return kept
 
 #: Names that hold credentials (`AI_RULES` 1). Never listed, never copied,
 #: never backed up, at any depth. `sync_candidates` and `state_backup` read the

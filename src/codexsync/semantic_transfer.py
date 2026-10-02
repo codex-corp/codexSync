@@ -18,6 +18,13 @@ Two gates keep this honest:
   has in the state directory it came from (``MIRROR_LAYOUT_ID``). Gating the
   mirror too would leave the mirror with no way to be rebuilt at all, because
   sessions are excluded from generic mtime copying as semantic-owned.
+
+  Nor does it cover a branch this machine already holds where the runtime's
+  catalogue names it (`IN_PLACE`, CS-330a). Writing over that file chooses no
+  path at all, so there is no layout to prove: it is how a chat continued on
+  the other machine reaches this one. A session this machine has never held
+  still needs a proven layout -- or `[semantic] new_chats = "same_path"`, which
+  places it at the path it had on its own machine, as 0.1 did (D-020).
 * A write into the Codex state directory is refused unless the runtime's own
   thread catalogue already places that branch at exactly that path. On an
   observed machine every session on disk has a catalogue row naming its rollout
@@ -121,9 +128,50 @@ class ResolutionChoice(str, Enum):
 #:
 #: Deliberately empty: see docs/dev/experiments/session-layout-adapter.md. While it
 #: is empty a plan can be built and read, and nothing can be written into a
-#: directory the Codex runtime reads. Writes towards the cloud mirror are a
+#: directory the Codex runtime reads except over a branch already there at the
+#: path the catalogue names (`IN_PLACE`). Writes towards the cloud mirror are a
 #: separate destination and are not gated on this dict.
 PROVEN_LAYOUTS: dict[str, str] = {}
+
+#: A chat this machine has never held goes to the path it has on the machine it
+#: came from, relative to `.codex` -- which is what 0.1 did by copying
+#: `sessions/` wholesale, and what the owner observed Codex pick up (D-020).
+#: That was observed on an older Codex and not in the controlled run, so it is
+#: not a `PROVEN_LAYOUTS` entry: it is used only where `[semantic] new_chats`
+#: asks for it, every item it places carries `NEW_CHAT_SAME_PATH`, and `doctor`
+#: reports each chat on disk the runtime's catalogue has not taken up
+#: (`session_visibility`), so a chat Codex does not show is a warning rather
+#: than a silence.
+SAME_PATH_LAYOUT_ID = "codex-same-relative-path-v1"
+_SAME_PATH_TEMPLATE = "{state}/{source_dir}/{file_name}"
+
+#: Layout id a plan is built under, per `[semantic] new_chats` value.
+#: `keep_in_cloud` is the id every plan had before the setting existed, so those
+#: plans keep their id.
+NEW_CHATS_LAYOUTS: dict[str, str] = {
+    "keep_in_cloud": "unproven",
+    "same_path": SAME_PATH_LAYOUT_ID,
+}
+
+#: A chat this machine never held, placed at its source path under
+#: `SAME_PATH_LAYOUT_ID`. The runtime's catalogue has no row for it yet; the
+#: chat shows in Codex only if Codex takes the file up itself.
+NEW_CHAT_SAME_PATH = "NEW_CHAT_SAME_PATH"
+
+
+def layout_for_new_chats(setting: str) -> str:
+    try:
+        return NEW_CHATS_LAYOUTS[setting]
+    except KeyError:
+        raise FailSafeError(f"Unknown semantic.new_chats value {setting!r}") from None
+
+
+def _layout_template(layout_id: str) -> str | None:
+    if layout_id in PROVEN_LAYOUTS:
+        return PROVEN_LAYOUTS[layout_id]
+    if layout_id == SAME_PATH_LAYOUT_ID:
+        return _SAME_PATH_TEMPLATE
+    return None
 
 #: State directories a branch can live under, and therefore the first segment
 #: of every source relative path the catalogue produces.
@@ -230,6 +278,17 @@ LAYOUT_DISAGREES_WITH_BRANCH = "LAYOUT_DISAGREES_WITH_BRANCH"
 #: A working set was chosen and covers no session: nothing is written into
 #: `.codex`, and the mirror is written in full as always.
 WORKING_SET_MATCHES_NOTHING = "WORKING_SET_MATCHES_NOTHING"
+#: A branch bound for `.codex` is written over the file this machine already
+#: keeps it in, at the path the runtime's own catalogue names for it. No layout
+#: is rendered, so none has to be proven: where the session lives here is read,
+#: not chosen (CS-330a).
+IN_PLACE = "IN_PLACE"
+#: Why a branch this machine holds could not be written in place. Each keeps the
+#: item blocked on the layout, as before in-place writes existed.
+IN_PLACE_CATALOG_ABSENT = "IN_PLACE_CATALOG_ABSENT"
+IN_PLACE_STATE_CHANGES = "IN_PLACE_STATE_CHANGES"
+IN_PLACE_CONTAINER = "IN_PLACE_CONTAINER"
+IN_PLACE_ARCHIVE_FLAG_DIFFERS = "IN_PLACE_ARCHIVE_FLAG_DIFFERS"
 
 
 def _format_migration_codes(local: SessionDescriptor, remote: SessionDescriptor) -> tuple[str, ...]:
@@ -776,8 +835,31 @@ def _gate_write(
             extra = extra + ("MIRROR_CONTAINER_KEPT",)
         if remote is not None and logical_relative_path(target) != logical_relative_path(source.relative_path):
             extra = extra + (MIRROR_PATH_KEPT,)
+    elif local is None and layout_id == SAME_PATH_LAYOUT_ID:
+        # A chat this machine never held, asked for by `new_chats = same_path`.
+        # The catalogue has no row for it, and that is the case being taken on
+        # trust; a catalogue that does know the thread and places it somewhere
+        # else, or cannot be read, still refuses, since a file here would then
+        # be a second copy the runtime ignores.
+        side, target = "local", target_relative_path(layout_id, source)
+        objection = _catalogue_objection(placements, session_id, target)
+        if objection is not None and objection != ("SESSION_NOT_IN_CATALOG",):
+            return make(
+                TransferAction.BLOCKED_UNSUPPORTED_BACKEND,
+                target=target, conflict=conflict, extra=extra + objection,
+            )
+        extra = extra + (NEW_CHAT_SAME_PATH,)
     elif layout_id not in PROVEN_LAYOUTS:
-        return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra)
+        if local is None:
+            # A session this machine has never held: where it would have to go,
+            # and whether the runtime would find it there, is what the layout
+            # experiment is for (CS-330b).
+            return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra)
+        refusal = _in_place_refusal(placements, session_id, local, source)
+        if refusal is not None:
+            return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra + refusal)
+        side, target = "local", local.relative_path
+        extra = extra + (IN_PLACE,)
     else:
         side, target = "local", target_relative_path(layout_id, source)
         objection = _catalogue_objection(placements, session_id, target)
@@ -813,6 +895,45 @@ def _gate_write(
         return make(TransferAction.BLOCKED_TARGET_COLLISION, target=target, conflict=conflict, extra=extra)
     claimed_targets[claim] = session_id
     return make(action, target=target, conflict=conflict, extra=extra)
+
+
+def _in_place_refusal(
+    placements: ThreadPlacements | None,
+    session_id: str,
+    local: SessionDescriptor,
+    source: SessionDescriptor,
+) -> tuple[str, ...] | None:
+    """Why ``source`` may not replace ``local`` where it lies, if it may not.
+
+    An in-place write chooses no path: it is the file this machine already
+    keeps the session in, and it is allowed only where the runtime's own
+    catalogue names exactly that file for exactly this thread. Then nothing
+    about the layout is guessed -- the runtime already reads that path -- and
+    only the contents move on, which is what continuing a chat on the other
+    machine produced. Everything else stays blocked as it was:
+
+    * no catalogue, or one that cannot be read: nothing proves the runtime
+      finds the session by that file, so here `ABSENT` refuses, where under a
+      proven layout it constrains nothing;
+    * a catalogue that does not know the thread or places it elsewhere;
+    * a branch that is archived on one side and active on the other, or whose
+      archive flag in the catalogue disagrees with the folder it sits in --
+      that is a move, and a move needs a delete;
+    * a local branch in a compressed container, which the runtime would not
+      read as the plain JSONL the write produces.
+    """
+    if codec_of(local.relative_path) is not JsonlCodec.NONE:
+        return (IN_PLACE_CONTAINER,)
+    if source.state is not local.state:
+        return (IN_PLACE_STATE_CHANGES,)
+    if placements is None or placements.status is PlacementStatus.ABSENT:
+        return (IN_PLACE_CATALOG_ABSENT,)
+    objection = _catalogue_objection(placements, session_id, local.relative_path)
+    if objection is not None:
+        return objection
+    if (session_id in placements.archived) != (local.state is SessionState.ARCHIVED):
+        return (IN_PLACE_ARCHIVE_FLAG_DIFFERS,)
+    return None
 
 
 def _catalogue_objection(
@@ -861,7 +982,8 @@ def target_relative_path(layout_id: str, source: SessionDescriptor) -> str:
 
     Refuses on an unproven layout: the source filename records where the branch
     used to live on another machine, which is evidence about that machine and
-    not an instruction for this one.
+    not an instruction for this one. `SAME_PATH_LAYOUT_ID` is the one exception,
+    and only because a person asked for it (`[semantic] new_chats`).
 
     The logical name is used, never the stored one. A branch coming back out of
     the cloud mirror is stored in a container there, and the Codex runtime
@@ -872,12 +994,12 @@ def target_relative_path(layout_id: str, source: SessionDescriptor) -> str:
     ``session_id``; empty segments collapse, so one template can describe a
     date-partitioned ``sessions/`` tree and a flat ``archived_sessions/`` one.
     """
-    if layout_id not in PROVEN_LAYOUTS:
+    template = _layout_template(layout_id)
+    if template is None:
         raise FailSafeError(
             f"Session layout {layout_id!r} is not proven, so a destination path cannot be chosen. "
             "Run the controlled experiment in docs/dev/experiments/session-layout-adapter.md."
         )
-    template = PROVEN_LAYOUTS[layout_id]
     if "{session_id}" in template and not source.session_id:
         raise FailSafeError(
             f"Session layout {layout_id!r} names the session id, which this branch does not carry"

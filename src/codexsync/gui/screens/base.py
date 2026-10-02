@@ -129,6 +129,11 @@ class Screen(QWidget):
     def failure_text(self, outcome: Outcome) -> str:
         if outcome.failure is None:
             return ""
+        # A refusal core names by kind is said in the window's language; the
+        # English message is only for kinds the catalogue has no sentence for.
+        known = f"failure.code.{outcome.code}" if outcome.code else ""
+        if known and self.host.catalog.has(known):
+            return f"{self.headline(outcome.failure)}: {self.t(known)}"
         return f"{self.headline(outcome.failure)}: {outcome.message}" if outcome.message else self.headline(outcome.failure)
 
     def join(self, parts: list[str]) -> str:

@@ -324,6 +324,9 @@ class FakeController(Controller):
     def codex_backups(self) -> Outcome:
         return self._answer("codex_backups", Outcome(value=[]))
 
+    def codex_backup_folder(self) -> Outcome:
+        return self._answer("codex_backup_folder", Outcome(value=None))
+
     def create_codex_backup(self, *, progress=None) -> Outcome:
         self.calls.append(("create_codex_backup",))
         return self._answer("create_codex_backup", Outcome(failure=Failure.CODEX_NOT_STOPPED, message="open"))
@@ -726,6 +729,15 @@ class OverviewSideTests(_OverviewCase):
         self.assertIn(window.catalog.plural("common.minutes", 15), screen.automation_line.text())
 
 
+def _full_sync_result(*, added: int = 0, missing: int = 0):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        sync_actions=2, session_actions=1, projects_added=added, projects_missing_folders=missing,
+        chats_not_loaded=0,
+    )
+
+
 class SyncTests(_WindowTestCase):
     def test_a_real_sync_asks_first_and_does_nothing_when_declined(self) -> None:
         window, controller = self.make(confirm=False)
@@ -736,12 +748,50 @@ class SyncTests(_WindowTestCase):
 
     def test_a_confirmed_sync_runs_and_discards_the_stale_preview(self) -> None:
         window, controller = self.make()
+        controller.outcomes["handoff_now"] = Outcome(value=_full_sync_result())
         window.go_to("sync")
         screen = window.screen("sync")
         screen.start_run(dry_run=False)
-        self.assertIn(("sync", False), controller.calls)
         self.assertIsNone(screen.model.preview)
         self.assertIn(window.catalog.text("sync.done.apply"), screen.result.text())
+
+    def test_the_sync_button_runs_the_full_sync_with_chats_and_projects(self) -> None:
+        # CS-334: a sync that left chats and projects behind is how a laptop
+        # kept its own sidebar after "Synchronise".
+        window, controller = self.make()
+        controller.outcomes["handoff_now"] = Outcome(value=_full_sync_result(added=3, missing=1))
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.start_run(dry_run=False)
+        self.assertIn(("handoff_now",), controller.calls)
+        self.assertNotIn(("sync", False), controller.calls)
+        text = screen.result.text()
+        self.assertIn(window.catalog.plural("sync.count.projects_added", 3), text)
+        self.assertIn(window.catalog.plural("sync.note.missing_folders", 1), text)
+
+    def test_a_sync_stopped_on_chats_says_why_and_opens_sessions_for_that_pair(self) -> None:
+        # CS-342: on the laptop the sync stopped with an English line naming a
+        # console command, and nothing in the window led to the decision.
+        window, controller = self.make()
+        controller.outcomes["handoff_now"] = Outcome(
+            failure=Failure.NEEDS_A_DECISION, message="11 chat(s) need a decision",
+            code="CHAT_DECISIONS_NEEDED",
+            details={"source": "machine-a", "target": "laptop", "format_migrations": 9,
+                     "held_migrations": 0, "divergences": 2, "collisions": 0, "archive_moves": 0},
+        )
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.start_run(dry_run=False)
+        text = screen.result.text()
+        self.assertIn(window.catalog.plural("sync.decisions.format_migrations", 9), text)
+        self.assertIn(window.catalog.plural("sync.decisions.divergences", 2), text)
+        self.assertNotIn("sessions scan", text)
+        self.assertTrue(screen.decide_button.isVisibleTo(window))
+        screen.decide_button.click()
+        sessions = window.screen("sessions")
+        self.assertIs(window._stack.currentWidget(), sessions)
+        self.assertEqual(sessions._pair(), ("machine-a", "laptop"))
+        self.assertTrue(any(call[0] == "scan_sessions" for call in controller.calls))
 
     def test_a_dry_run_never_asks(self) -> None:
         window, controller = self.make(confirm=False)
@@ -1204,7 +1254,7 @@ class ActivityTests(_WindowTestCase):
             def __init__(self):
                 self.abandoned = []
 
-            def start(self, call, done):
+            def start(self, call, done, report=None):
                 pending.append((call, done))
                 return len(pending)
 
@@ -2168,6 +2218,43 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertIn(("scheduler", "interval_minutes"), edits)
 
 
+class BackupsCopiesTests(_WindowTestCase):
+    """CS-341: a copy of `.codex` can be made from Backups too, as one shared job."""
+
+    def test_without_a_folder_the_page_says_so_and_the_button_is_off(self) -> None:
+        window, _ = self.make()
+        window.go_to("backups")
+        screen = window.screen("backups")
+        self.assertFalse(screen.copy_now.isEnabled())
+        self.assertEqual(screen.copies_folder.text(), window.catalog.text("backups.copies.no_folder"))
+        screen.copies_configure.click()
+        self.assertIs(window._stack.currentWidget(), window.screen("automation"))
+
+    def test_with_a_folder_a_copy_is_made_and_both_pages_show_it(self) -> None:
+        controller = FakeController()
+        controller.outcomes["codex_backup_folder"] = Outcome(value=Path("D:/Copies"))
+        window, _ = self.make(controller=controller)
+        window.go_to("backups")
+        screen = window.screen("backups")
+        self.assertIn("D:", screen.copies_folder.text())
+        self.assertTrue(screen.copy_now.isEnabled())
+        screen.copy_now.click()
+        self.assertIn(("create_codex_backup",), controller.calls)
+        refusal = window.catalog.text("failure.codex-not-stopped")
+        self.assertIn(refusal, screen.copy_status.text())
+        window.go_to("automation")
+        self.assertIn(refusal, window.screen("automation").copy_status.text())
+
+    def test_a_running_copy_turns_the_button_off_on_both_pages(self) -> None:
+        controller = FakeController()
+        controller.outcomes["codex_backup_folder"] = Outcome(value=Path("D:/Copies"))
+        window, _ = self.make(controller=controller)
+        window.go_to("backups")
+        window.model("automation").copy_busy = True
+        window.screen("backups").render()
+        self.assertFalse(window.screen("backups").copy_now.isEnabled())
+
+
 class AutomationPageTests(_WindowTestCase):
     """CS-276: every OS task on its own page, and copies of .codex."""
 
@@ -2519,6 +2606,73 @@ class AboutTests(_WindowTestCase):
         catalog = load("ru")
         self.assertEqual(screen.copy_button.text(), catalog.text("about.build.copy"))
         self.assertIn(catalog.text("about.build.version"), dict(screen._rows()))
+
+
+class ConfigBannerTests(_WindowTestCase):
+    """Opening a config an earlier version wrote says so at once (CS-331).
+
+    Before this the first word about it was a refused sync quoting core's
+    English sentence inside a translated one; the upgrade card existed but was
+    only found by opening Settings.
+    """
+
+    def _window(self, plan=None, language: str = "en"):
+        controller = FakeController()
+        if plan is not None:
+            controller.outcomes["config_migration"] = Outcome(value=plan)
+        window, controller = self.make(language, controller=controller)
+        return window, controller
+
+    def test_a_config_that_blocks_writes_is_announced_on_opening(self) -> None:
+        window, controller = self._window()
+        self.assertIn(("config_migration", ()), controller.calls, "the file was not checked on opening")
+        self.assertFalse(window._banner.isHidden())
+        self.assertEqual(window._banner_text.text(), load("en").text("banner.config.outdated"))
+
+    def test_the_banner_opens_the_settings_card_with_that_plan(self) -> None:
+        from codexsync.gui.window import PAGES
+
+        window, _controller = self._window()
+        window.offer_config_upgrade()
+        self.assertEqual(window._nav.currentRow(), PAGES.index("settings"))
+        screen = window.screen("settings")
+        self.assertIs(screen.model.migration, window._config_check)
+        self.assertFalse(screen.migration_card.isHidden())
+        self.assertFalse(screen.migration_details_box.isHidden(), "the findings are shown unfolded")
+
+    def test_optional_differences_alone_do_not_nag(self) -> None:
+        window, _controller = self._window((_migration_plan(blocker=False), _MIGRATION_DIFF))
+        self.assertTrue(window._banner.isHidden())
+
+    def test_a_current_config_shows_nothing(self) -> None:
+        window, _controller = self._window((_migration_plan(current=True), ""))
+        self.assertTrue(window._banner.isHidden())
+
+    def test_the_banner_follows_the_language(self) -> None:
+        window, _controller = self._window(language="ru")
+        self.assertEqual(window._banner_text.text(), load("ru").text("banner.config.outdated"))
+
+    def test_an_outdated_config_refusal_is_said_in_the_windows_language(self) -> None:
+        window, _controller = self._window(language="ru")
+        refusal = Outcome(
+            failure=Failure.CONFIGURATION,
+            message="process_detection.allow_terminate_if_running=true is no longer supported",
+            code="CONFIG_OUTDATED",
+        )
+        text = window.screen("sync").failure_text(refusal)
+        self.assertIn(load("ru").text("failure.code.CONFIG_OUTDATED"), text)
+        self.assertNotIn("no longer supported", text)
+
+    def test_core_names_the_refusal_by_kind(self) -> None:
+        from codexsync.exceptions import ConfigOutdatedError
+        from codexsync.gui.controller import run
+
+        def refuse():
+            raise ConfigOutdatedError("sync.session_mode=last_date_only ...", setting="sync.session_mode")
+
+        outcome = run(refuse)
+        self.assertEqual(outcome.failure, Failure.CONFIGURATION)
+        self.assertEqual(outcome.code, "CONFIG_OUTDATED")
 
 
 if __name__ == "__main__":

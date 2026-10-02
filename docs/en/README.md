@@ -143,7 +143,7 @@ codexSync reports the case instead of guessing:
 
 | What | How it shows | Experiment |
 |---|---|---|
-| Writing a transferred session branch *into* `.codex` | `BLOCKED_UNPROVEN_LAYOUT` | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
+| Writing a session this machine has never had *into* `.codex` (a chat it already has is written over its own file; `[semantic] new_chats = "same_path"` writes a new one at its source path) | `BLOCKED_UNPROVEN_LAYOUT` | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
 | Rewriting `session_index.jsonl` | `UNPROVEN_CONSUMER_CONTRACT` | [session-index-contract](../dev/experiments/session-index-contract.md) |
 | Detecting Codex on macOS and Linux | platform unsupported, writes refused | [process-detector-macos](../dev/experiments/process-detector-macos.md) |
 | Projects stored in `state_*.sqlite` | moving a project rewrites the JSON only; deleting or merging projects is not offered | [project-registry-contract](../dev/experiments/project-registry-contract.md) |

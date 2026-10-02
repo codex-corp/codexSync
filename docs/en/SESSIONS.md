@@ -155,15 +155,52 @@ codexsync -c config.toml sessions apply --plan sessions-plan.json --confirm-plan
 
 Where the Codex runtime looks for a session file is a property of that runtime:
 put the file somewhere else and the session is invisible, with no error at all.
-So a write **into** `.codex` needs two things:
+So a write **into** `.codex` takes one of two routes.
 
-- **a proven target layout.** Until a controlled experiment records it, such an
-  item is reported as `BLOCKED_UNPROVEN_LAYOUT`
-  ([experiment](../dev/experiments/session-layout-adapter.md));
-- **a row in Codex's thread catalogue** (`state_*.sqlite`) naming exactly that
-  file. codexSync does not write SQLite, so a session the catalogue has never
-  heard of cannot be made visible, and is reported as
-  `UNSUPPORTED_STATE_BACKEND`.
+**A chat this machine already has** — one you continued on the other machine —
+is written over its own file (`IN_PLACE`). Codex's thread catalogue
+(`state_*.sqlite`) names that file, so no path is chosen and nothing about the
+layout is guessed: the newer copy of the same chat, with its continuation,
+replaces the older one, after the older one is in a verified backup. It is
+allowed only when the catalogue names exactly that file for that chat, and the
+chat is active on both machines or archived on both. Otherwise the item stays
+`BLOCKED_UNPROVEN_LAYOUT` with a code saying why: `IN_PLACE_CATALOG_ABSENT`,
+`SESSION_NOT_IN_CATALOG`, `CATALOG_PLACES_ELSEWHERE`, `CATALOG_UNREADABLE`,
+`IN_PLACE_STATE_CHANGES`, `IN_PLACE_ARCHIVE_FLAG_DIFFERS` or
+`IN_PLACE_CONTAINER`.
+
+Codex also keeps each chat's title, preview and time in that catalogue, and
+codexSync never writes it. The chat list may therefore show the old ones until
+Codex refreshes them; the conversation itself is read from the file.
+
+**A chat this machine has never had** is decided by one setting:
+
+```toml
+[semantic]
+new_chats = "keep_in_cloud"   # keep_in_cloud | same_path
+```
+
+- `keep_in_cloud` (the default) leaves it in the cloud copy, reported as
+  `BLOCKED_UNPROVEN_LAYOUT`: where Codex expects a new chat file has not been
+  proven by the [controlled experiment](../dev/experiments/session-layout-adapter.md).
+- `same_path` writes it into `.codex` at the path it has on the machine it came
+  from, relative to `.codex` — `sessions/<year>/<month>/<day>/…` or
+  `archived_sessions/…` — which is what 0.1 did by copying `sessions/` whole.
+  The user name and drive do not matter, since the path is relative. Each such
+  item carries `NEW_CHAT_SAME_PATH`. A file already at that path is never
+  overwritten (`DESTINATION_OCCUPIED`), and a catalogue that places the chat
+  somewhere else or cannot be read still refuses (`BLOCKED_UNSUPPORTED_BACKEND`).
+
+Codex lists chats from its thread catalogue, which codexSync does not write, so
+with `same_path` a new chat appears only once Codex takes the file up itself.
+That was observed under 0.1 and not yet in the controlled run, so it is checked
+every time: after starting Codex, `doctor` reports `session_visibility` — how
+many chat files here the catalogue does not list. `not_listed=0` means every
+chat is visible.
+
+The chat's working folder may be elsewhere on this machine. The file is not
+changed for that (a record's bytes are its identity); map the folder with
+`[[path_mappings]]` or move the project instead, see [Projects](PROJECTS.md).
 
 Writing **towards the cloud folder** is not gated: no Codex reads that copy, so a
 branch the mirror does not hold yet keeps the relative path it has locally. A

@@ -29,6 +29,7 @@ class OperationKind(str, Enum):
     RECOVER_ROLLBACK = "recover_rollback"
     GUARDIAN_RESTORE = "guardian_restore"
     PROJECT_MOVE = "project_move"
+    PROJECT_SYNC = "project_sync"
     STATE_BACKUP = "state_backup"
 
 
@@ -70,6 +71,7 @@ OPERATION_PROFILES: dict[OperationKind, OperationProfile] = {
     OperationKind.RECOVER_ROLLBACK: OperationProfile(OperationKind.RECOVER_ROLLBACK, True, True, False),
     OperationKind.GUARDIAN_RESTORE: OperationProfile(OperationKind.GUARDIAN_RESTORE, True, True, False),
     OperationKind.PROJECT_MOVE: OperationProfile(OperationKind.PROJECT_MOVE, True, True, False),
+    OperationKind.PROJECT_SYNC: OperationProfile(OperationKind.PROJECT_SYNC, True, True, False),
     # Writes nothing into Codex state, yet needs it stopped: a copy of a SQLite
     # file or a session taken while its writer runs is a copy of no moment.
     OperationKind.STATE_BACKUP: OperationProfile(OperationKind.STATE_BACKUP, True, False, False),

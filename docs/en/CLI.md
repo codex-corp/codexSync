@@ -49,6 +49,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `sessions index` | no | Report what each `session_index.jsonl` holds | [Sessions](SESSIONS.md#the-session-index) |
 | `chats list` / `chats tree` | no | Find chats and see which project each is in | [Projects](PROJECTS.md#chats) |
 | `chats move` | **yes** | Put chosen chats under one project | [Projects](PROJECTS.md#moving-chats-to-a-project) |
+| `projects sync` | **yes** | Merge other machines' project lists into this one, then publish this one's (preview without `--confirm-plan`) | [Projects](PROJECTS.md#projects-between-machines) |
 | `repair-projects scan` | no | Build an immutable, hashed repair plan | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
 | `repair-projects apply` | **yes** | Apply one exact plan, quoted by its id | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
 | `project-move scan` | no | Hash a project and plan copying it to a new folder | [Projects](PROJECTS.md#moving-a-projects-files) |

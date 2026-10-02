@@ -76,6 +76,20 @@ _TEMPLATE_ROOTS: frozenset[str] | None = None
 #: runtime installs and deletes, and a file it removed comes back every run.
 SKILLS_SYSTEM_GLOB = "skills/.system/**"
 
+#: Folders under `plugins/` that hold the Codex runtime's own programs, not
+#: anything a person made: `.plugin-appserver` carries `codex.exe`,
+#: `codex-command-runner.exe`, the sandbox setup and the code-mode host (416 MB
+#: on the machine this was found on), and the staging folder is where Codex
+#: unpacks a plugin it is installing. Codex puts both there itself, for its own
+#: version and platform, so copying them is useless on a Mac and harmful on
+#: another Windows machine, where it would overwrite that machine's `codex.exe`
+#: with another version. Plugins proper live in `plugins/cache/`, already
+#: excluded by `**/cache/**`.
+CODEX_BINARY_GLOBS = (
+    "plugins/.plugin-appserver/**",
+    "plugins/.remote-plugin-install-staging/**",
+)
+
 #: Sections a newer version introduced whose absence changes nothing, because
 #: the loader defaults to exactly what the template writes.
 OPTIONAL_SECTIONS = ("guardian", "semantic")
@@ -93,6 +107,7 @@ BACKUP_DISABLED = "BACKUP_DISABLED"
 SESSION_MODE_LAST_DATE = "SESSION_MODE_LAST_DATE"
 DETECTION_LIST_OUTDATED = "DETECTION_LIST_OUTDATED"
 MISSING_EXCLUDE_SKILLS_SYSTEM = "MISSING_EXCLUDE_SKILLS_SYSTEM"
+MISSING_EXCLUDE_CODEX_BINARIES = "MISSING_EXCLUDE_CODEX_BINARIES"
 OBSOLETE_INCLUDE_ROOT = "OBSOLETE_INCLUDE_ROOT"
 LEGACY_SCHEDULER_KEYS = "LEGACY_SCHEDULER_KEYS"
 SCHEDULER_INTERVAL_MIGRATED = "SCHEDULER_INTERVAL_MIGRATED"
@@ -108,6 +123,7 @@ FINDING_CODES: tuple[str, ...] = (
     SESSION_MODE_LAST_DATE,
     DETECTION_LIST_OUTDATED,
     MISSING_EXCLUDE_SKILLS_SYSTEM,
+    MISSING_EXCLUDE_CODEX_BINARIES,
     OBSOLETE_INCLUDE_ROOT,
     SCHEDULER_INTERVAL_MIGRATED,
     SCHEDULER_INTERVAL_TOO_SHORT,
@@ -471,6 +487,16 @@ def _correctness_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
             "skills itself, and with delete_policy = \"never\" a file it deleted returns on every run",
             (ConfigEdit("append", "filters", "exclude_globs", [SKILLS_SYSTEM_GLOB]),),
             params=MappingProxyType({"glob": SKILLS_SYSTEM_GLOB}),
+        )
+    binaries_missing = [glob for glob in CODEX_BINARY_GLOBS if glob not in globs]
+    if "exclude_globs" in filters and binaries_missing:
+        yield ConfigFinding(
+            MISSING_EXCLUDE_CODEX_BINARIES, CORRECTNESS,
+            "Codex's own programs under plugins/ are not excluded, so they are copied to the cloud "
+            "and onto other machines, where they are useless or overwrite that machine's own "
+            f"version: {', '.join(binaries_missing)}",
+            (ConfigEdit("append", "filters", "exclude_globs", binaries_missing),),
+            params=MappingProxyType({"globs": ", ".join(binaries_missing)}),
         )
 
     targets = _table(document, "targets")

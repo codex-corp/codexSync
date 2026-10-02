@@ -106,7 +106,10 @@ class SyncScreen(Screen):
         self.body.addWidget(self.views, stretch=1)
 
         self.result = label("", wrap=True)
-        self.body.addWidget(self.result)
+        self.decide_button = button(self.t("sync.decisions.open"), primary=True)
+        self.decide_button.clicked.connect(self.open_decisions)
+        self.decide_button.setVisible(False)
+        self.body.addLayout(row(self.result, self.decide_button))
 
     def _build_history(self):
         self.history_summary = label()
@@ -264,7 +267,22 @@ class SyncScreen(Screen):
                 # A real run -- finished or not -- may have left a journal.
                 model.history = None
 
-        self.run(lambda: controller.sync(dry_run=dry_run), apply)
+        if dry_run:
+            self.run(lambda: controller.sync(dry_run=True), apply)
+            return
+        # The real thing is the full sync the handoff runs (CS-334): settings,
+        # then chats, then projects, one confirmation for all of it -- a button
+        # called "Synchronise" that left the chats and the project list behind
+        # is how a laptop ended up with its own sidebar after a sync.
+        self.host.run(self.page, lambda progress=None: controller.handoff_now(progress=progress), apply, progress=True)
+
+    def open_decisions(self) -> None:
+        """Go to the chats the stopped sync named, for the pair it was syncing."""
+        run = self.model.result
+        if run is None or not isinstance(run.details, dict):
+            return
+        self.host.go_to("sessions")
+        self.host.screen("sessions").open_for(str(run.details["source"]), str(run.details["target"]))
 
     def render(self) -> None:
         model = self.model
@@ -332,10 +350,13 @@ class SyncScreen(Screen):
 
         run = model.result
         if model.run_busy:
-            self.result.setText(self.t("sync.running"))
+            self.result.setText(self.progress_text() or self.t("sync.running"))
             set_tone(self.result, None, palette)
         elif run is None:
             self.result.setText("")
+        elif run.ok and hasattr(run.value, "sync_actions"):
+            self.result.setText(full_sync_result(self, run.value))
+            set_tone(self.result, "attention" if run.value.projects_missing_folders else "ok", palette)
         elif run.ok:
             value = run.value
             key = "sync.done.apply" if value.applied else "sync.done.dry"
@@ -344,10 +365,17 @@ class SyncScreen(Screen):
                 self.p("sync.count.conflicts", value.conflicts),
             ]))
             set_tone(self.result, "ok", palette)
+        elif run.code == DECISIONS_CODE and isinstance(run.details, dict):
+            self.result.setText(decisions_text(self, run.details))
+            set_tone(self.result, "attention", palette)
         else:
             self.result.setText(self.failure_text(run))
             set_tone(self.result, "danger", palette)
         self.result.setVisible(bool(self.result.text()))
+        self.decide_button.setVisible(
+            not model.run_busy and run is not None and not run.ok and run.code == DECISIONS_CODE
+            and isinstance(run.details, dict)
+        )
         self._render_history()
         if (
             model.view == "history" and model.history is None
@@ -406,6 +434,36 @@ class SyncScreen(Screen):
             return self.join(parts)
         # A journal from before the counts were recorded knows only the total.
         return self.p("sync.count.files", run.action_count) if run.action_count is not None else "—"
+
+
+#: A full sync stopped on chats a person has to decide (`ChatDecisionsNeeded`).
+DECISIONS_CODE = "CHAT_DECISIONS_NEEDED"
+
+
+def decisions_text(screen: Screen, details: dict) -> str:
+    """Why the sync stopped, what kinds of decisions wait, and that nothing was written."""
+    lines = [screen.t("sync.decisions.title")]
+    for key in ("format_migrations", "held_migrations", "divergences", "collisions", "archive_moves"):
+        count = int(details.get(key) or 0)
+        if count:
+            lines.append("• " + screen.p(f"sync.decisions.{key}", count))
+    lines.append(screen.t("sync.decisions.next"))
+    return "\n".join(lines)
+
+
+def full_sync_result(screen: Screen, result) -> str:
+    """What a full sync (`app.HandoffResult`) did, as one or more sentences."""
+    text = screen.t("sync.done.apply") + " " + screen.join([
+        screen.p("sync.count.files", result.sync_actions),
+        screen.p("sync.count.chats", result.session_actions),
+        screen.p("sync.count.projects_added", result.projects_added),
+    ])
+    notes = []
+    if result.projects_missing_folders:
+        notes.append(screen.p("sync.note.missing_folders", result.projects_missing_folders))
+    if result.chats_not_loaded:
+        notes.append(screen.p("sync.note.chats_not_loaded", result.chats_not_loaded))
+    return "\n".join([text, *notes])
 
 
 def run_result(screen: Screen, run) -> str:
