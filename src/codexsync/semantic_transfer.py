@@ -25,6 +25,12 @@ Two gates keep this honest:
   the other machine reaches this one. A session this machine has never held
   still needs a proven layout -- or `[semantic] new_chats = "same_path"`, which
   places it at the path it had on its own machine, as 0.1 did (D-020).
+
+  An archive move is the one write that changes where a branch lives (D-023):
+  a chat archived (or taken out of the archive) on one machine is moved into
+  the same state folder on the other, at the path the other machine keeps it
+  under, and the old file is removed after its backup. It too requires the
+  catalogue to name the file being moved.
 * A write into the Codex state directory is refused unless the runtime's own
   thread catalogue already places that branch at exactly that path. On an
   observed machine every session on disk has a catalogue row naming its rollout
@@ -41,14 +47,14 @@ is still on disk, byte for byte.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from .exceptions import FailSafeError
 from .jsonl_codec import JsonlCodec, codec_of, logical_name, logical_relative_path, with_codec
@@ -149,8 +155,8 @@ _SAME_PATH_TEMPLATE = "{state}/{source_dir}/{file_name}"
 #: `keep_in_cloud` is the id every plan had before the setting existed, so those
 #: plans keep their id.
 NEW_CHATS_LAYOUTS: dict[str, str] = {
-    "keep_in_cloud": "unproven",
     "same_path": SAME_PATH_LAYOUT_ID,
+    "keep_in_cloud": "unproven",
 }
 
 #: A chat this machine never held, placed at its source path under
@@ -289,6 +295,91 @@ IN_PLACE_CATALOG_ABSENT = "IN_PLACE_CATALOG_ABSENT"
 IN_PLACE_STATE_CHANGES = "IN_PLACE_STATE_CHANGES"
 IN_PLACE_CONTAINER = "IN_PLACE_CONTAINER"
 IN_PLACE_ARCHIVE_FLAG_DIFFERS = "IN_PLACE_ARCHIVE_FLAG_DIFFERS"
+
+#: An archive move (D-023): one machine archived a chat or took it out of the
+#: archive, and the other side follows. Which side moved is read from this
+#: machine's own semantic manifest entry -- the state both sides last agreed
+#: on -- never from clocks: the side that still holds that state is the one
+#: that did not move. With no entry of its own this machine follows the
+#: mirror, whose state another machine vouched for when it wrote it.
+#:
+#: `ARCHIVE_FOLLOWS_REMOTE`: this machine's `.codex` follows the mirror.
+ARCHIVE_FOLLOWS_REMOTE = "ARCHIVE_FOLLOWS_REMOTE"
+#: `ARCHIVE_FOLLOWS_LOCAL`: the mirror follows this machine.
+ARCHIVE_FOLLOWS_LOCAL = "ARCHIVE_FOLLOWS_LOCAL"
+#: The side being written keeps the session in the other state folder, so the
+#: branch is written where the followed side keeps it and the old file is
+#: removed -- after a verified backup, in the same envelope (D-023).
+MOVES_BRANCH = "MOVES_BRANCH"
+#: One machine archived the chat and the other continued it: the side that did
+#: not move holds records the moved side lacks. Which of the two to keep is a
+#: person's decision, like any other divergence.
+ARCHIVED_AND_CONTINUED = "ARCHIVED_AND_CONTINUED"
+#: One session id in two files on this machine, settled by the runtime's own
+#: catalogue naming exactly one of them (CS-348). The other file is a copy the
+#: runtime no longer reads; it is left where it is and never transferred.
+STALE_DUPLICATE_BY_CATALOG = "STALE_DUPLICATE_BY_CATALOG"
+
+
+def transfer_direction(item: "TransferItem") -> str | None:
+    """Which side a writable item writes: ``"local"`` (`.codex`) or ``"mirror"``."""
+    if item.action is TransferAction.FAST_FORWARD_LOCAL:
+        return "local"
+    if item.action is TransferAction.FAST_FORWARD_REMOTE:
+        return "mirror"
+    if item.action is TransferAction.ARCHIVE_TRANSITION:
+        return "mirror" if ARCHIVE_FOLLOWS_LOCAL in item.codes else "local"
+    return None
+
+
+def prefer_catalogued_copies(
+    catalog: SessionCatalog, placements: ThreadPlacements | None
+) -> SessionCatalog:
+    """Settle a duplicate session id by the runtime's own thread catalogue.
+
+    Codex sometimes carries a thread on in a new rollout file and leaves the old
+    one where it was. Observed: `rollout-…-<id>.jsonl` and
+    `rollout-…-<id>_<other>.jsonl`, both opening with the same `session_meta`,
+    and `threads.rollout_path` naming the second. Where the catalogue names
+    exactly one of the copies, that copy is the session's branch; the others
+    stay on disk untouched -- still occupying their paths -- and are marked
+    `STALE_DUPLICATE_BY_CATALOG` instead of making the whole session unusable.
+
+    Anything less certain leaves the duplicate as it was: no catalogue, one that
+    cannot be read, one naming none of the copies, or a copy that is broken in
+    its own right.
+    """
+    if not catalog.branches or placements is None or placements.status is not PlacementStatus.AVAILABLE:
+        return catalog
+    chosen: dict[str, str] = {}
+    for session_id, branch in catalog.branches.items():
+        recorded = placements.placement_of(session_id)
+        named = [item for item in branch.descriptors if item.relative_path == recorded]
+        if len(named) != 1:
+            continue
+        if any(code in INVALID_CODES for item in branch.descriptors for code in item.codes):
+            continue
+        chosen[session_id] = named[0].relative_path
+    if not chosen:
+        return catalog
+    descriptors: list[SessionDescriptor] = []
+    for item in catalog.descriptors:
+        if item.session_id not in chosen:
+            descriptors.append(item)
+        elif item.relative_path == chosen[item.session_id]:
+            descriptors.append(replace(
+                item,
+                state=_state_of_folder(item.relative_path),
+                codes=tuple(code for code in item.codes if code != DUPLICATE_SESSION_ID),
+            ))
+        else:
+            descriptors.append(replace(item, codes=item.codes + (STALE_DUPLICATE_BY_CATALOG,)))
+    branches = {key: value for key, value in catalog.branches.items() if key not in chosen}
+    return SessionCatalog(descriptors, branches, catalog.codes, catalog.volatile)
+
+
+def _state_of_folder(relative_path: str) -> SessionState:
+    return SessionState.ARCHIVED if relative_path.startswith("archived_sessions/") else SessionState.ACTIVE
 
 
 def _format_migration_codes(local: SessionDescriptor, remote: SessionDescriptor) -> tuple[str, ...]:
@@ -499,8 +590,13 @@ def build_transfer_plan(
     scope: Iterable[str] | None = None,
     path_rules: list[PathMappingRule] | None = None,
     folder_exists: Callable[[str], bool] | None = None,
+    agreed_states: Mapping[str, str] | None = None,
 ) -> TransferPlan:
     """Classify every session present on either side and freeze the decisions.
+
+    ``agreed_states`` maps a session hash to the state (``ACTIVE``/``ARCHIVED``)
+    this machine last recorded agreeing on with the mirror. It decides which
+    side of an archive move moved; without it this machine follows the mirror.
 
     ``resolutions`` are keyed by conflict id. ``confirmed_bases`` holds the
     session hashes for which the semantic store has a recorded common ancestor.
@@ -545,57 +641,35 @@ def build_transfer_plan(
 
     items: list[TransferItem] = []
     claimed_targets: dict[str, str] = {}
+    agreed_states = agreed_states or {}
+    # Copies the catalogue settled as no longer read (CS-348). They are not
+    # branches, but the item says they exist, so the file left on disk is
+    # never a silence.
+    stale_duplicates = {
+        descriptor.session_id for descriptor in local_catalog.descriptors
+        if STALE_DUPLICATE_BY_CATALOG in descriptor.codes
+    }
 
     for session_id in sorted(set(local_groups) | set(remote_groups)):
         session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-        unusable = _unusable_item(
-            session_hash, local_groups.get(session_id, ()), remote_groups.get(session_id, ())
+        item, one_sided = _classify(
+            session_hash, session_id,
+            local_groups.get(session_id, ()), remote_groups.get(session_id, ()),
+            local_root=local_root, remote_root=remote_root,
+            confirmed_bases=confirmed_bases, max_line_bytes=max_line_bytes,
+            resolutions=resolutions, resolutions_by_session=by_session,
+            placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
+            claimed_targets=claimed_targets, cwd_code=cwd_code, occupied=occupied,
+            agreed_state=agreed_states.get(session_hash),
         )
-        if unusable is not None:
-            items.append(unusable)
-            codes.extend(unusable.codes)
-            continue
-        # Past that check each side holds at most one copy, and it is valid.
-        local = next(iter(local_groups.get(session_id, ())), None)
-        remote = next(iter(remote_groups.get(session_id, ())), None)
-
-        if local is None or remote is None:
-            # One side simply does not have this session yet. That is a plain
-            # copy, but where it lands is still a placement decision, so it goes
-            # through the same gate a fast-forward does.
-            items.append(
-                _one_sided_item(
-                    session_hash, session_id, local, remote,
-                    placements=placements, layout_id=layout_id,
-                    mirror_codec=mirror_codec,
-                    claimed_targets=claimed_targets,
-                    cwd_code=cwd_code,
-                    occupied=occupied,
-                )
-            )
-            continue
-
-        comparison = compare_session_branches(
-            local_root / _os_path(local.relative_path),
-            remote_root / _os_path(remote.relative_path),
-            local_state=_branch_state(local.state),
-            remote_state=_branch_state(remote.state),
-            has_confirmed_base=session_hash in confirmed_bases,
-            max_line_bytes=max_line_bytes,
-        )
-        item = _decide(
-            session_hash, session_id, comparison, local, remote,
-            resolutions=resolutions,
-            resolutions_by_session=by_session,
-            placements=placements,
-            layout_id=layout_id,
-            mirror_codec=mirror_codec,
-            claimed_targets=claimed_targets,
-            cwd_code=cwd_code,
-            occupied=occupied,
-        )
+        if session_id in stale_duplicates:
+            item = replace(item, codes=tuple(dict.fromkeys((*item.codes, STALE_DUPLICATE_BY_CATALOG))))
+            codes.append(STALE_DUPLICATE_BY_CATALOG)
         items.append(item)
-        codes.extend(item.codes)
+        # A one-sided item does not feed the plan's codes (its folder code
+        # does, below): being on one side only is the normal case.
+        if not one_sided:
+            codes.extend(item.codes)
 
     scope_matches_nothing = False
     if scope is not None:
@@ -623,6 +697,45 @@ def build_transfer_plan(
     return _with_plan_id(plan)
 
 
+def _classify(
+    session_hash: str,
+    session_id: str,
+    local_all: tuple[SessionDescriptor, ...],
+    remote_all: tuple[SessionDescriptor, ...],
+    *,
+    local_root: Path,
+    remote_root: Path,
+    confirmed_bases: set[str],
+    max_line_bytes: int,
+    agreed_state: str | None,
+    **gate,
+) -> tuple[TransferItem, bool]:
+    """One session's item, and whether it is one-sided."""
+    unusable = _unusable_item(session_hash, local_all, remote_all)
+    if unusable is not None:
+        return unusable, False
+    # Past that check each side holds at most one copy, and it is valid.
+    local = next(iter(local_all), None)
+    remote = next(iter(remote_all), None)
+    gate_only = {key: value for key, value in gate.items() if key not in {"resolutions", "resolutions_by_session"}}
+    if local is None or remote is None:
+        # One side simply does not have this session yet. That is a plain
+        # copy, but where it lands is still a placement decision, so it goes
+        # through the same gate a fast-forward does.
+        return _one_sided_item(session_hash, session_id, local, remote, **gate_only), True
+    comparison = compare_session_branches(
+        local_root / _os_path(local.relative_path),
+        remote_root / _os_path(remote.relative_path),
+        local_state=_branch_state(local.state),
+        remote_state=_branch_state(remote.state),
+        has_confirmed_base=session_hash in confirmed_bases,
+        max_line_bytes=max_line_bytes,
+    )
+    return _decide(
+        session_hash, session_id, comparison, local, remote, agreed_state=agreed_state, **gate,
+    ), False
+
+
 def _apply_scope(item: TransferItem, scope: set[str]) -> TransferItem:
     """Narrow one item to the working set.
 
@@ -639,6 +752,9 @@ def _apply_scope(item: TransferItem, scope: set[str]) -> TransferItem:
     if item.action in {
         TransferAction.NOOP, TransferAction.FAST_FORWARD_REMOTE, TransferAction.BLOCKED_INVALID_BRANCH,
     }:
+        return item
+    if transfer_direction(item) == "mirror":
+        # An archive move the mirror follows writes only the mirror.
         return item
     return TransferItem(
         item.session_hash, item.relation, TransferAction.OUT_OF_SCOPE,
@@ -665,6 +781,7 @@ def _decide(
     claimed_targets: dict[str, str],
     cwd_code: Callable[[SessionDescriptor], str | None] | None = None,
     occupied: Callable[[str, str], bool] | None = None,
+    agreed_state: str | None = None,
 ) -> TransferItem:
     def make(action: TransferAction, *, target: str | None = None, conflict: str | None = None,
              extra: tuple[str, ...] = ()) -> TransferItem:
@@ -675,29 +792,15 @@ def _decide(
             target, conflict, extra,
         )
 
-    if comparison.relation is BranchRelation.IDENTICAL:
-        return make(TransferAction.NOOP)
-
-    if comparison.relation is BranchRelation.INVALID:
-        # Each copy read cleanly alone, but not side by side: one changed or
-        # broke in between. There are no branch hashes a decision could be
-        # pinned to, so this is not a conflict anyone can resolve -- the
-        # session is left alone until it reads cleanly.
-        return TransferItem(
-            session_hash, comparison.relation, TransferAction.BLOCKED_INVALID_BRANCH,
-            local.sha256, remote.sha256, local.line_count, remote.line_count,
-            None, None, (COMPARISON_FAILED,),
+    def write(action: TransferAction, **kwargs) -> TransferItem:
+        return _gate_write(
+            make, action, session_id, local, remote,
+            placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
+            claimed_targets=claimed_targets, cwd_code=cwd_code, occupied=occupied, **kwargs,
         )
 
-    if comparison.is_conflict:
+    def conflict_item(kind: tuple[str, ...]) -> TransferItem:
         conflict = conflict_id_for(session_hash, comparison.local_sha256, comparison.remote_sha256)
-        # Only a divergence of content can be a format rewrite. A missing base
-        # is an archive move waiting for proof of ancestry, and labelling it
-        # would let `--format-migrations` overwrite one side of it in bulk.
-        kind = (
-            _format_migration_codes(local, remote)
-            if comparison.relation in _DIVERGENCES else ()
-        )
         resolution = resolutions.get(conflict)
         if resolution is None:
             previous = resolutions_by_session.get(session_hash)
@@ -716,23 +819,56 @@ def _decide(
             TransferAction.FAST_FORWARD_REMOTE if resolution.choice is ResolutionChoice.KEEP_LOCAL
             else TransferAction.FAST_FORWARD_LOCAL
         )
-        return _gate_write(
-            make, resolved, session_id, local, remote,
-            placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
-            claimed_targets=claimed_targets, cwd_code=cwd_code, occupied=occupied,
-            conflict=conflict, extra=kind + ("RESOLVED_BY_USER",),
+        return write(resolved, conflict=conflict, extra=kind + ("RESOLVED_BY_USER",))
+
+    if comparison.relation is BranchRelation.IDENTICAL:
+        return make(TransferAction.NOOP)
+
+    if comparison.relation is BranchRelation.INVALID:
+        # Each copy read cleanly alone, but not side by side: one changed or
+        # broke in between. There are no branch hashes a decision could be
+        # pinned to, so this is not a conflict anyone can resolve -- the
+        # session is left alone until it reads cleanly.
+        return TransferItem(
+            session_hash, comparison.relation, TransferAction.BLOCKED_INVALID_BRANCH,
+            local.sha256, remote.sha256, local.line_count, remote.line_count,
+            None, None, (COMPARISON_FAILED,),
+        )
+
+    if comparison.is_conflict:
+        # Only a divergence of content can be a format rewrite. A missing base
+        # is an archive move waiting for proof of ancestry, and labelling it
+        # would let `--format-migrations` overwrite one side of it in bulk.
+        return conflict_item(
+            _format_migration_codes(local, remote)
+            if comparison.relation in _DIVERGENCES else ()
+        )
+
+    if comparison.relation is BranchRelation.ARCHIVE_TRANSITION:
+        # Which side moved: the one that no longer holds the state both sides
+        # last agreed on. With no agreement of this machine's own on record,
+        # the mirror's state is followed -- another machine vouched for it.
+        follows_local = agreed_state is not None and agreed_state == remote.state.value
+        followed, other = (
+            (comparison.local_records, comparison.remote_records) if follows_local
+            else (comparison.remote_records, comparison.local_records)
+        )
+        if other > followed:
+            # Archived on one machine and continued on the other: adopting the
+            # move would drop the continuation, and keeping it would undo the
+            # move. A person picks the branch, state included.
+            return conflict_item((ARCHIVED_AND_CONTINUED,))
+        return write(
+            TransferAction.ARCHIVE_TRANSITION,
+            towards_local=not follows_local,
+            extra=(ARCHIVE_FOLLOWS_LOCAL if follows_local else ARCHIVE_FOLLOWS_REMOTE,),
         )
 
     action = {
         BranchRelation.FAST_FORWARD_LOCAL: TransferAction.FAST_FORWARD_LOCAL,
         BranchRelation.FAST_FORWARD_REMOTE: TransferAction.FAST_FORWARD_REMOTE,
-        BranchRelation.ARCHIVE_TRANSITION: TransferAction.ARCHIVE_TRANSITION,
     }[comparison.relation]
-    return _gate_write(
-        make, action, session_id, local, remote,
-        placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
-        claimed_targets=claimed_targets, cwd_code=cwd_code, occupied=occupied,
-    )
+    return write(action)
 
 
 def _one_sided_item(
@@ -794,18 +930,26 @@ def _gate_write(
     occupied: Callable[[str, str], bool] | None = None,
     conflict: str | None = None,
     extra: tuple[str, ...] = (),
+    towards_local: bool | None = None,
 ) -> TransferItem:
-    source = remote if action is TransferAction.FAST_FORWARD_LOCAL else local
+    if towards_local is None:
+        towards_local = action is TransferAction.FAST_FORWARD_LOCAL
+    source = remote if towards_local else local
     if source is None:
         raise FailSafeError("A transfer decision has no source branch to copy")
-    if action is TransferAction.FAST_FORWARD_LOCAL and cwd_code is not None:
+    # The side being written keeps this session in the other state folder: an
+    # archive move, or a resolution that keeps the side archived (or not) on
+    # its own. The branch then goes where the followed side keeps it, and the
+    # old file is removed after its backup (D-023).
+    moving = False
+    if towards_local and cwd_code is not None:
         # Said before the gate decides, so a branch blocked on the layout or the
         # catalogue -- or later held back by the working set -- still tells a
         # person what it would have been like here.
         folder = cwd_code(source)
         if folder is not None:
             extra = extra + (folder,)
-    if action is TransferAction.FAST_FORWARD_REMOTE:
+    if not towards_local:
         # Destination is codexSync's own mirror, which no Codex reads, so the
         # layout is ours and the source path is the answer rather than a guess.
         # Nothing has to find this file afterwards, so the catalogue is not
@@ -823,18 +967,54 @@ def _gate_write(
         # refused here in the same way an archive transition is.
         #
         # The path follows the same rule. A branch the mirror already holds is
-        # rewritten where it is, whatever path the source keeps it under: a chat
-        # archived here and still active in the mirror would otherwise gain a
-        # second file there -- the same duplicate by another route.
+        # rewritten where it is, whatever path the source keeps it under: a
+        # second file there would be the same duplicate by another route. The
+        # one exception is an archive state that changes, which moves the
+        # mirror's file into the other state folder and removes the old one.
         stored = codec_of(remote.relative_path) if remote is not None else None
         codec = mirror_codec if stored is None else stored
         side = "mirror"
-        target = remote.relative_path if remote is not None else mirror_relative_path(source, codec)
         extra = extra + ("MIRROR_DESTINATION",)
+        if remote is not None and remote.state is not source.state:
+            moving = True
+            target = mirror_relative_path(source, codec)
+            extra = extra + (MOVES_BRANCH,)
+        else:
+            target = remote.relative_path if remote is not None else mirror_relative_path(source, codec)
         if stored is not None and stored is not mirror_codec:
             extra = extra + ("MIRROR_CONTAINER_KEPT",)
-        if remote is not None and logical_relative_path(target) != logical_relative_path(source.relative_path):
+        if (
+            remote is not None and not moving
+            and logical_relative_path(target) != logical_relative_path(source.relative_path)
+        ):
             extra = extra + (MIRROR_PATH_KEPT,)
+    elif local is not None and local.state is not source.state:
+        # This machine keeps the chat in the other state folder. It goes where
+        # the other machine's Codex put it -- the same relative path, as
+        # `new_chats = same_path` places a new chat -- and only when the
+        # catalogue names exactly the file being moved, so the file the runtime
+        # reads is the one that moves. The catalogue row itself still names the
+        # old path afterwards; codexSync never writes it, and `doctor`'s
+        # `session_visibility` counts such chats.
+        #
+        # Under a proven layout the layout names the new path and the
+        # catalogue is consulted as for any write there.
+        if layout_id in PROVEN_LAYOUTS:
+            target = target_relative_path(layout_id, source)
+            objection = _catalogue_objection(placements, session_id, local.relative_path)
+            if objection is not None:
+                return make(
+                    TransferAction.BLOCKED_UNSUPPORTED_BACKEND,
+                    target=target, conflict=conflict, extra=extra + objection,
+                )
+        else:
+            refusal = _in_place_refusal(placements, session_id, local, source, moving=True)
+            if refusal is not None:
+                return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra + refusal)
+            target = logical_relative_path(source.relative_path)
+        moving = True
+        side = "local"
+        extra = extra + (MOVES_BRANCH,)
     elif local is None and layout_id == SAME_PATH_LAYOUT_ID:
         # A chat this machine never held, asked for by `new_chats = same_path`.
         # The catalogue has no row for it, and that is the case being taken on
@@ -878,7 +1058,7 @@ def _gate_write(
             )
 
     destination = remote if side == "mirror" else local
-    if destination is None and occupied is not None and occupied(side, target):
+    if (destination is None or moving) and occupied is not None and occupied(side, target):
         # Nothing on that side is this session, yet a file sits where the copy
         # would go: a branch whose id could not be read, or one not attributed
         # to any session. Replacing it would destroy a history nobody compared.
@@ -902,8 +1082,14 @@ def _in_place_refusal(
     session_id: str,
     local: SessionDescriptor,
     source: SessionDescriptor,
+    *,
+    moving: bool = False,
 ) -> tuple[str, ...] | None:
     """Why ``source`` may not replace ``local`` where it lies, if it may not.
+
+    With ``moving`` the branch is not written over ``local`` but beside it, in
+    the other state folder, and ``local`` is removed: the state check and the
+    container check do not apply, every catalogue check does.
 
     An in-place write chooses no path: it is the file this machine already
     keeps the session in, and it is allowed only where the runtime's own
@@ -922,9 +1108,9 @@ def _in_place_refusal(
     * a local branch in a compressed container, which the runtime would not
       read as the plain JSONL the write produces.
     """
-    if codec_of(local.relative_path) is not JsonlCodec.NONE:
+    if not moving and codec_of(local.relative_path) is not JsonlCodec.NONE:
         return (IN_PLACE_CONTAINER,)
-    if source.state is not local.state:
+    if not moving and source.state is not local.state:
         return (IN_PLACE_STATE_CHANGES,)
     if placements is None or placements.status is PlacementStatus.ABSENT:
         return (IN_PLACE_CATALOG_ABSENT,)
@@ -1168,6 +1354,10 @@ def _groups_by_session_id(catalog: SessionCatalog) -> dict[str, tuple[SessionDes
     """Every descriptor that names a session id, valid or not, per id."""
     groups: dict[str, list[SessionDescriptor]] = {}
     for descriptor in catalog.descriptors:
+        if STALE_DUPLICATE_BY_CATALOG in descriptor.codes:
+            # Not a branch: the catalogue settled which copy is (CS-348). The
+            # file still occupies its path through `_destination_check`.
+            continue
         if descriptor.session_id:
             groups.setdefault(descriptor.session_id, []).append(descriptor)
     return {session_id: tuple(items) for session_id, items in groups.items()}

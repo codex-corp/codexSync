@@ -26,6 +26,7 @@ from codexsync.semantic_transfer import (
     DESTINATION_OCCUPIED,
     FORMAT_MIGRATION,
     MIRROR_PATH_KEPT,
+    MOVES_BRANCH,
     BranchResolution,
     ResolutionChoice,
     TransferAction,
@@ -136,19 +137,33 @@ class UnusableBranchTests(_Sides):
 class MirrorPathTests(_Sides):
     """CS-299: a resolved conflict is written where the mirror keeps the branch."""
 
-    def test_keep_local_rewrites_the_mirror_copy_in_place(self) -> None:
-        _session(self.local / "archived_sessions" / "rollout-s.jsonl", "s", [{"r": 1}, {"r": "mine"}])
-        _session(self.remote / "sessions" / "2026" / "rollout-s.jsonl", "s", [{"r": 1}, {"r": "theirs"}])
+    def _keep_local(self):
         conflict = self._only(self._plan())
         self.assertIs(conflict.action, TransferAction.BLOCKED_CONFLICT)
         resolution = BranchResolution(
             conflict.conflict_id, conflict.session_hash,
             conflict.local_sha256, conflict.remote_sha256, ResolutionChoice.KEEP_LOCAL,
         )
-        item = self._only(self._plan(resolutions={conflict.conflict_id: resolution}))
+        return self._only(self._plan(resolutions={conflict.conflict_id: resolution}))
+
+    def test_keep_local_rewrites_the_mirror_copy_in_place(self) -> None:
+        _session(self.local / "sessions" / "a" / "rollout-s.jsonl", "s", [{"r": 1}, {"r": "mine"}])
+        _session(self.remote / "sessions" / "2026" / "rollout-s.jsonl", "s", [{"r": 1}, {"r": "theirs"}])
+        item = self._keep_local()
         self.assertIs(item.action, TransferAction.FAST_FORWARD_REMOTE)
         self.assertEqual(item.target_relative_path, "sessions/2026/rollout-s.jsonl")
         self.assertIn(MIRROR_PATH_KEPT, item.codes)
+
+    def test_keep_local_moves_the_mirror_copy_when_the_archive_state_differs(self) -> None:
+        # Archived here, active in the mirror: the kept branch carries its state
+        # with it, so the mirror's file moves and the old one goes (D-023).
+        _session(self.local / "archived_sessions" / "rollout-s.jsonl", "s", [{"r": 1}, {"r": "mine"}])
+        _session(self.remote / "sessions" / "2026" / "rollout-s.jsonl", "s", [{"r": 1}, {"r": "theirs"}])
+        item = self._keep_local()
+        self.assertIs(item.action, TransferAction.FAST_FORWARD_REMOTE)
+        self.assertEqual(item.target_relative_path, "archived_sessions/rollout-s.jsonl")
+        self.assertIn(MOVES_BRANCH, item.codes)
+        self.assertNotIn(MIRROR_PATH_KEPT, item.codes)
 
     def test_the_usual_path_carries_no_new_code(self) -> None:
         _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}, {"r": 2}])

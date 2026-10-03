@@ -73,13 +73,14 @@ max_jsonl_line_bytes = 67108864
 # rescan and confirm the new id before applying.
 mirror_compression = "xz"
 # What a transfer does with a chat this machine has never held:
-#   keep_in_cloud  leave it in the cloud copy (nothing unproven is written);
 #   same_path      write it into the Codex state directory at the path it has
-#                  on the machine it came from, as 0.1 did. Codex shows it only
-#                  if it takes the file up itself; `doctor` counts the chats its
-#                  catalogue does not list (session_visibility).
+#                  on the machine it came from, as 0.1 did (the default: a chat
+#                  started on one machine is carried to the other). Codex shows
+#                  it only if it takes the file up itself; `doctor` counts the
+#                  chats its catalogue does not list (session_visibility).
+#   keep_in_cloud  leave it in the cloud copy (nothing unproven is written).
 # A chat both machines already hold is continued in place either way.
-new_chats = "keep_in_cloud"
+new_chats = "same_path"
 
 [targets]
 # Relative paths under local_state_dir/cloud_state_dir included in sync

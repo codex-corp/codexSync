@@ -177,8 +177,8 @@ codexsync -c config.toml handoff watch                    # 登录任务运行�
 某个文件之后在云端副本中被手动修改过。
 
 **聊天。**两台电脑都有的聊天——也就是在另一台电脑上继续过的聊天——会覆盖它自己的文件
-载入 `.codex`，路径正是 Codex 自己的目录为它记录的路径。在另一台电脑上新开的聊天只有在 `[semantic] new_chats = "same_path"` 时才会载入，路径与它在
-那台电脑上的相同；默认情况下它留在云端副本中（见[会话](SESSIONS.md#写入-codex)）。交接会说明
+载入 `.codex`，路径正是 Codex 自己的目录为它记录的路径。在另一台电脑上新开的聊天也会载入，路径与它在
+那台电脑上的相同（`[semantic] new_chats = "same_path"`，默认值）；设为 `keep_in_cloud` 时它留在云端副本中（见[会话](SESSIONS.md#写入-codex)）。交接会说明
 它把多少新聊天写入了 Codex（Codex 是否列出它们由 `doctor` 显示），以及有多少聊天仅保留在
 云端副本中，而不是声称工作已载入。
 
@@ -191,14 +191,15 @@ codexsync -c config.toml handoff watch                    # 登录任务运行�
 每一次真正的同步都会留下一条操作日志，历史就是按从新到旧读取的这些日志——不需要另外维护记录：
 
 ```powershell
-codexsync -c config.toml history                 # 最近 20 次同步
-codexsync -c config.toml history --family all    # 所有写操作：sync、sessions、chats、restore…
+codexsync -c config.toml history                  # 最近 20 次各类运行
+codexsync -c config.toml history --family sync    # 仅一种：sync、sessions、project-sync、chats、restore…
 codexsync -c config.toml history --json --limit 0
 ```
 
+一次完整同步是三次运行，每个部分一次：`sync`（设置文件）、`sessions`（聊天）和 `project-sync`（项目）。
 每次运行都会显示开始时间、结果（失败时显示错误类型——绝不显示错误消息，因为其中可能含有文件名）、
-启动方（`window`、`cli`、登录时任务对应的 `unattended`，或交接监视器对应的 `handoff`）、有多少文件传到云端、传到本地以及被删除，
-以及它创建的备份。在这些字段出现之前写入的日志只显示总数。
+启动方（`window`、`cli`、登录时任务对应的 `unattended`，或交接监视器对应的 `handoff`）、它传输了什么——
+传到云端、传到本地以及被删除的文件或聊天，或新增的项目——以及它创建的备份。在这些字段出现之前写入的日志只显示总数。
 
 不会列出：不写入任何内容的试运行，以及在第一次写入前就停止的运行——Codex 已打开，或 `manual_abort`
 下的冲突。窗口在“同步”页面的 **历史** 选项卡中显示同一份列表，并在“概览”中显示最近一次运行。

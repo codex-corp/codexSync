@@ -36,6 +36,16 @@ class SpecMetadataTests(unittest.TestCase):
             with self.subTest(spec=name):
                 self.assertIn("from PyInstaller.utils.hooks import", text)
 
+    def test_both_specs_give_the_exe_the_same_icon(self) -> None:
+        # Explorer, the taskbar and the scheduled tasks show the console exe
+        # too; without an icon it reads as some other program.
+        for name in SPECS:
+            text = Path(name).read_text(encoding="utf-8")
+            with self.subTest(spec=name):
+                self.assertIn('"gui" / "resources" / "codexsync.ico"', text)
+                self.assertIn("icon=str(icon)", text)
+        self.assertTrue(Path("src/codexsync/gui/resources/codexsync.ico").is_file())
+
 
 class VersionTests(unittest.TestCase):
     def test_an_installed_package_never_reports_the_fallback(self) -> None:

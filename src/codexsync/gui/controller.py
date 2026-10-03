@@ -37,6 +37,7 @@ import tomllib
 from typing import Any, Callable, TypeVar
 
 from ..app import (
+    known_machines,
     session_pair_name,
     __version__,
     accept_guardian_baseline,
@@ -221,8 +222,10 @@ class ConfigInfo:
     """The parts of the loaded config that screens show or default from."""
 
     machine_id: str | None
-    #: Every machine name the config mentions: this one, and both ends of
-    #: every `[[path_mappings]]` rule. Offered as choices, never enforced.
+    #: Every machine name known here: this one, both ends of every
+    #: `[[path_mappings]]` rule, and every machine that left a trace in the
+    #: shared workspace (`app.known_machines`). Offered as choices, never
+    #: enforced.
     machines: tuple[str, ...]
     workspace_root_dir: Path | None
     local_state_dir: Path | None
@@ -230,6 +233,9 @@ class ConfigInfo:
     backup_dir: Path
     temp_dir: Path
     plans_dir: Path
+    #: The machine a full sync would pair with for chats, so the Sessions page
+    #: opens on the same pair whichever way it is reached (CS-345).
+    usual_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,12 +423,11 @@ class Controller:
     def config_info(self) -> Outcome:
         def build() -> ConfigInfo:
             cfg = load_config(self._config_path)
-            names = {cfg.identity.machine_id} if cfg.identity.machine_id else set()
-            for rule in cfg.path_mappings:
-                names.update((rule.source_machine, rule.target_machine))
+            known = known_machines(self._config_path)
             return ConfigInfo(
                 machine_id=cfg.identity.machine_id,
-                machines=tuple(sorted(name for name in names if name)),
+                machines=known.names,
+                usual_source=known.usual_source,
                 workspace_root_dir=cfg.paths.workspace_root_dir,
                 local_state_dir=cfg.paths.local_state_dir,
                 cloud_root_dir=cfg.paths.cloud_root_dir,
@@ -651,6 +656,7 @@ class Controller:
             confirm_plan=confirm_plan,
             resolutions_path=scan.resolutions_path if scan.used_resolutions else None,
             dry_run=dry_run,
+            origin="window",
         ))
 
     def apply_repair(self, scan: RepairScan, *, confirm_plan: str, dry_run: bool = False) -> Outcome:
@@ -710,8 +716,13 @@ class Controller:
         return run(lambda: list_journals(self._config_path))
 
     def sync_history(self, *, limit: int | None = None) -> Outcome:
-        """Past sync runs, newest first, from the same journals recovery reads."""
-        return run(lambda: list_history(self._config_path, family="sync", limit=limit))
+        """Past runs of every kind, newest first, from the same journals recovery reads.
+
+        One full sync writes three journals -- settings, chats, projects --
+        and a history of the first alone read "0 to the cloud, 0 to local"
+        after a run that carried 26 chats and 13 projects.
+        """
+        return run(lambda: list_history(self._config_path, limit=limit))
 
     def inspect_journal(self, operation_id: str) -> Outcome:
         return run(lambda: inspect_recovery(self._config_path, operation_id))

@@ -53,7 +53,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `repair-projects apply` | **是** | 按标识执行某一份确切的计划 | [项目](PROJECTS.md#换机之后的修复) |
 | `project-move scan` | 否 | 为项目计算哈希，并规划复制到新文件夹 | [项目](PROJECTS.md#搬移项目的文件) |
 | `project-move apply` | **是** | 复制、校验，然后让 Codex 指向新文件夹 | [项目](PROJECTS.md#搬移项目的文件) |
-| `history` | 否 | 根据日志列出过去的同步（或所有写操作） | [同步](SYNC.md#历史) |
+| `history` | 否 | 根据日志列出过去的各类写操作（或某一类） | [同步](SYNC.md#历史) |
 | `recover inspect` | 否 | 无副作用地读取一条写操作日志 | [恢复](RECOVERY.md#被中断的写操作) |
 | `recover resume` / `rollback` | **是** | 收尾一个被中断的写操作 | [恢复](RECOVERY.md#被中断的写操作) |
 

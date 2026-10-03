@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from .. import theme
@@ -88,6 +89,13 @@ class Screen(QWidget):
     def activated(self) -> None:
         """The screen was just shown."""
 
+    def reveal(self, target: str) -> None:
+        """Bring ``target`` -- a tab or a ``section.key`` field -- into view.
+
+        Another page's message pointed here (`MainWindow.go_to`). A screen
+        that has nothing addressable ignores it.
+        """
+
     # --- helpers --------------------------------------------------------------
 
     def t(self, key: str, /, **params: object) -> str:
@@ -95,6 +103,22 @@ class Screen(QWidget):
 
     def p(self, key: str, count: int, /, **params: object) -> str:
         return self.host.catalog.plural(key, count, **params)
+
+    def show_widget(self, widget: QWidget) -> None:
+        """Scroll every area holding ``widget`` to it and give it the focus."""
+        def go() -> None:
+            child = widget
+            parent = widget.parentWidget()
+            while parent is not None:
+                if isinstance(parent, QScrollArea):
+                    parent.ensureWidgetVisible(child, 40, 40)
+                    child = parent
+                parent = parent.parentWidget()
+            widget.setFocus()
+        go()
+        # Once more after the page switch has laid itself out: a page that was
+        # hidden had no geometry to scroll to yet.
+        QTimer.singleShot(0, go)
 
     @property
     def palette_(self) -> theme.Palette:

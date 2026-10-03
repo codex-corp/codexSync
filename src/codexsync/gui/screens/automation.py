@@ -33,7 +33,7 @@ from ..controller import (
 )
 from ..widgets import Banner, Cell, button, card, fill_table, human_size, label, row, set_tone, table
 from .config_form import ConfigFormModel, ConfigFormScreen, Field, quote_part, when_or_never
-from .sync import local_time
+from .sync import ResultLinks, full_sync_notes, local_time
 
 PERIODIC_FIELDS: tuple[Field, ...] = (
     Field("scheduler", "enabled", "bool", False),
@@ -180,6 +180,8 @@ class AutomationScreen(ConfigFormScreen):
         layout.addLayout(row(self.handoff_now, self.handoff_refresh))
         self.handoff_status = label("", wrap=True)
         layout.addWidget(self.handoff_status)
+        self.handoff_links = ResultLinks(self)
+        layout.addLayout(self.handoff_links.layout)
         self.body.addWidget(frame)
 
         tasks, tasks_layout = card(self.t("automation.task.title"))
@@ -677,6 +679,7 @@ class AutomationScreen(ConfigFormScreen):
         self.handoff_table.setVisible(bool(rows))
 
         text, tone = "", None
+        self.handoff_links.show(None)
         if model.handoff_run_busy:
             text = self.progress_text() or self.t("automation.handoff.working")
         elif model.handoff_result is not None:
@@ -694,10 +697,11 @@ class AutomationScreen(ConfigFormScreen):
                     parts.append(self.t("automation.handoff.done.handed_off"))
                 if done.new_chats_written:
                     parts.append(self.p("automation.handoff.done.new", done.new_chats_written))
-                if done.chats_not_loaded:
-                    parts.append(self.p("automation.handoff.done.left", done.chats_not_loaded))
+                # The same notes and buttons as the Sync page's full sync.
+                parts.extend(full_sync_notes(self, done))
+                self.handoff_links.show(done)
                 text = " ".join(parts)
-                tone = "attention" if done.chats_not_loaded else "ok"
+                tone = "attention" if done.chats_not_loaded or done.projects_missing_folders else "ok"
         self.handoff_status.setText(text)
         set_tone(self.handoff_status, tone, palette)
         self.handoff_status.setVisible(bool(text))

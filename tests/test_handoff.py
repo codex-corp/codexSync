@@ -257,14 +257,30 @@ class RunHandoffTests(_Workspace):
             board.pending("desktop"), [], "a machine that handed nothing off leaves nothing to wait for"
         )
 
-    def test_a_chat_that_cannot_be_placed_in_codex_is_counted_not_called_loaded(self) -> None:
+    def test_a_chat_started_on_the_other_machine_is_carried_by_default(self) -> None:
+        # D-020 amendment (2026-10-03): carrying new chats is the job, so a
+        # config without a `new_chats` line writes them into `.codex`.
         desktop, desktop_codex = self.machine("desktop")
         laptop, _ = self.machine("laptop")
         self.session(desktop_codex, "22222222-2222-2222-2222-222222222222")
         run_handoff(desktop)
         loaded = run_handoff(laptop)
-        # PROVEN_LAYOUTS is empty: the chat stays in the mirror, and says so.
+        self.assertEqual(loaded.new_chats_written, 1)
+        self.assertEqual(loaded.chats_not_loaded, 0)
+
+    def test_a_chat_that_cannot_be_placed_in_codex_is_counted_not_called_loaded(self) -> None:
+        desktop, desktop_codex = self.machine("desktop")
+        laptop, _ = self.machine("laptop")
+        laptop.write_text(
+            laptop.read_text(encoding="utf-8").replace("[semantic]\n", '[semantic]\nnew_chats = "keep_in_cloud"\n', 1),
+            encoding="utf-8",
+        )
+        self.session(desktop_codex, "22222222-2222-2222-2222-222222222222")
+        run_handoff(desktop)
+        loaded = run_handoff(laptop)
+        # Kept in the cloud by choice: the chat stays in the mirror, and says so.
         self.assertEqual(loaded.chats_not_loaded, 1)
+        self.assertEqual(loaded.new_chats_kept_in_cloud, 1)
 
     def test_a_chat_continued_on_the_other_machine_is_loaded_in_place(self) -> None:
         # CS-330a: both machines hold the chat, the laptop's catalogue names its
@@ -293,6 +309,51 @@ class RunHandoffTests(_Workspace):
         self.assertEqual(
             [path.name for path in here.parent.iterdir()], [here.name], "one file for one chat"
         )
+
+    def test_the_other_machine_is_known_without_any_path_rule(self) -> None:
+        # CS-345: the laptop's config had no [[path_mappings]], so the Sessions
+        # page opened by hand had no other machine to offer.
+        from codexsync.app import known_machines
+
+        desktop, _ = self.machine("desktop")
+        laptop, _ = self.machine("laptop")
+        self.assertEqual(known_machines(laptop).usual_source, None, "nobody has handed off yet")
+        run_handoff(desktop)
+        known = known_machines(laptop)
+        self.assertIn("desktop", known.names)
+        self.assertIn("laptop", known.names)
+        self.assertEqual(known.usual_source, "desktop", "the pair the full sync uses")
+
+    def test_a_chat_archived_on_one_machine_is_archived_on_the_other(self) -> None:
+        # D-023: the laptop run of 2026-10-02 stopped for good on chats the
+        # desktop had archived, with nothing to decide anywhere.
+        session_id = "55555555-5555-5555-5555-555555555555"
+        desktop, desktop_codex = self.machine("desktop")
+        laptop, laptop_codex = self.machine("laptop")
+        there = self.session(desktop_codex, session_id, records=1)
+        here = self.session(laptop_codex, session_id, records=1)
+        connection = sqlite3.connect(laptop_codex / "state_5.sqlite")
+        try:
+            connection.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, archived INTEGER)")
+            connection.execute("INSERT INTO threads VALUES (?, ?, 0)", (session_id, str(here)))
+            connection.commit()
+        finally:
+            connection.close()
+        run_handoff(desktop)
+        run_handoff(laptop)
+
+        archived = desktop_codex / "archived_sessions" / there.name
+        archived.parent.mkdir(parents=True)
+        there.replace(archived)
+        run_handoff(desktop)
+        mirrored = sorted(path.relative_to(self.cloud).as_posix() for path in self.cloud.rglob("rollout-*"))
+        self.assertEqual(len(mirrored), 1, mirrored)
+        self.assertTrue(mirrored[0].startswith("archived_sessions/"), "the mirror follows the desktop")
+
+        loaded = run_handoff(laptop)
+        self.assertEqual(loaded.chats_not_loaded, 0)
+        self.assertTrue((laptop_codex / "archived_sessions" / here.name).is_file())
+        self.assertFalse(here.exists(), "one file for one chat")
 
     def test_a_diverged_chat_stops_the_sync_naming_the_pair_and_the_kind(self) -> None:
         # CS-342: the window needs to know which pair and what kind of decision.
@@ -392,7 +453,8 @@ class RunHandoffTests(_Workspace):
     def test_without_a_handoff_folder_or_a_manifest_there_is_no_handoff(self) -> None:
         config, _ = self.machine("laptop")
         text = config.read_text(encoding="utf-8").replace(f'root_dir = "{self.handoff_root.as_posix()}"', 'root_dir = ""')
-        text = text.replace(f'manifest_file = "{(self.workspace / 'manifest.json').as_posix()}"', "")
+        manifest = (self.workspace / "manifest.json").as_posix()
+        text = text.replace(f'manifest_file = "{manifest}"', "")
         config.write_text(text, encoding="utf-8")
         with self.assertRaises(ConfigError):
             handoff_status(config)
@@ -545,7 +607,8 @@ class HandoffConfigTests(_Workspace):
     def test_switching_on_without_a_folder_is_refused(self) -> None:
         config, _ = self.machine("laptop", enabled=True)
         text = config.read_text(encoding="utf-8").replace(f'root_dir = "{self.handoff_root.as_posix()}"', 'root_dir = ""')
-        text = text.replace(f'manifest_file = "{(self.workspace / 'manifest.json').as_posix()}"', "")
+        manifest = (self.workspace / "manifest.json").as_posix()
+        text = text.replace(f'manifest_file = "{manifest}"', "")
         config.write_text(text, encoding="utf-8")
         with self.assertRaisesRegex(ConfigError, "handoff.root_dir is empty"):
             load_config(config)

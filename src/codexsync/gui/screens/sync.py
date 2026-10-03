@@ -31,7 +31,7 @@ DIRECTIONS = ("all", "to_local", "to_cloud", "conflict")
 #: The views under the buttons, in tab order.
 VIEWS = ("plan", "history")
 #: How many past runs the History tab shows.
-HISTORY_LIMIT = 50
+HISTORY_LIMIT = 150
 #: Journal failures the History tab names in words; anything else shows its class.
 KNOWN_FAILURES = (
     "ConflictError",
@@ -110,6 +110,8 @@ class SyncScreen(Screen):
         self.decide_button.clicked.connect(self.open_decisions)
         self.decide_button.setVisible(False)
         self.body.addLayout(row(self.result, self.decide_button))
+        self.links = ResultLinks(self)
+        self.body.addLayout(self.links.layout)
 
     def _build_history(self):
         self.history_summary = label()
@@ -117,6 +119,7 @@ class SyncScreen(Screen):
         inner.addWidget(label(self.t("sync.history.caption"), "muted", wrap=True))
         self.history_table = table([
             self.t("sync.history.column.when"),
+            self.t("sync.history.column.kind"),
             self.t("sync.history.column.result"),
             self.t("sync.history.column.origin"),
             self.t("sync.history.column.changes"),
@@ -349,6 +352,7 @@ class SyncScreen(Screen):
         self.empty.setVisible(bool(self.empty.text()))
 
         run = model.result
+        self.links.show(None)
         if model.run_busy:
             self.result.setText(self.progress_text() or self.t("sync.running"))
             set_tone(self.result, None, palette)
@@ -356,6 +360,7 @@ class SyncScreen(Screen):
             self.result.setText("")
         elif run.ok and hasattr(run.value, "sync_actions"):
             self.result.setText(full_sync_result(self, run.value))
+            self.links.show(run.value)
             set_tone(self.result, "attention" if run.value.projects_missing_folders else "ok", palette)
         elif run.ok:
             value = run.value
@@ -408,6 +413,7 @@ class SyncScreen(Screen):
             fill_table(self.history_table, [
                 [
                     Cell(local_time(run.created_at_utc), tooltip=run.operation_id, data=run),
+                    Cell(self._kind(run.family)),
                     Cell(run_result(self, run), tone=_result_tone(run)),
                     Cell(self._origin(run.origin)),
                     Cell(self._changes(run)),
@@ -422,9 +428,23 @@ class SyncScreen(Screen):
     def _origin(self, origin: str | None) -> str:
         return self.t(f"sync.history.origin.{origin}") if origin in ORIGINS else "—"
 
+    def _kind(self, family: str | None) -> str:
+        """What a run wrote: settings, chats, projects ... (one full sync is three runs)."""
+        key = f"sync.history.family.{family}"
+        return self.t(key) if family and self.host.catalog.has(key) else (family or "—")
+
     def _changes(self, run) -> str:
         counts = run.counts
+        if counts and run.family == "project-sync":
+            parts = []
+            if counts.get("projects_added"):
+                parts.append(self.p("sync.count.projects_added", counts["projects_added"]))
+            if counts.get("changes"):
+                parts.append(self.p("sync.count.changes", counts["changes"]))
+            return self.join(parts) if parts else self.t("sync.history.no_changes")
         if counts:
+            if not any(counts.values()):
+                return self.t("sync.history.no_changes")
             parts = [
                 self.p("sync.count.to_cloud", counts.get("to_cloud", 0)),
                 self.p("sync.count.to_local", counts.get("to_local", 0)),
@@ -433,7 +453,13 @@ class SyncScreen(Screen):
                 parts.append(self.p("sync.count.deleted", counts["deletions"]))
             return self.join(parts)
         # A journal from before the counts were recorded knows only the total.
-        return self.p("sync.count.files", run.action_count) if run.action_count is not None else "—"
+        if run.action_count is None:
+            return "—"
+        if run.family == "sync":
+            return self.p("sync.count.files", run.action_count)
+        if run.family == "sessions":
+            return self.p("sync.count.chats", run.action_count)
+        return self.p("sync.count.changes", run.action_count)
 
 
 #: A full sync stopped on chats a person has to decide (`ChatDecisionsNeeded`).
@@ -443,7 +469,7 @@ DECISIONS_CODE = "CHAT_DECISIONS_NEEDED"
 def decisions_text(screen: Screen, details: dict) -> str:
     """Why the sync stopped, what kinds of decisions wait, and that nothing was written."""
     lines = [screen.t("sync.decisions.title")]
-    for key in ("format_migrations", "held_migrations", "divergences", "collisions", "archive_moves"):
+    for key in ("format_migrations", "held_migrations", "divergences", "collisions"):
         count = int(details.get(key) or 0)
         if count:
             lines.append("• " + screen.p(f"sync.decisions.{key}", count))
@@ -458,12 +484,59 @@ def full_sync_result(screen: Screen, result) -> str:
         screen.p("sync.count.chats", result.session_actions),
         screen.p("sync.count.projects_added", result.projects_added),
     ])
+    return "\n".join([text, *full_sync_notes(screen, result)])
+
+
+def full_sync_notes(screen: Screen, result) -> list[str]:
+    """What a full sync left for a person, one sentence each; `ResultLinks` leads there."""
     notes = []
     if result.projects_missing_folders:
         notes.append(screen.p("sync.note.missing_folders", result.projects_missing_folders))
-    if result.chats_not_loaded:
-        notes.append(screen.p("sync.note.chats_not_loaded", result.chats_not_loaded))
-    return "\n".join([text, *notes])
+    # The part a setting changes is said apart from the rest (CS-347).
+    if result.new_chats_kept_in_cloud:
+        notes.append(screen.p("sync.note.new_chats_in_cloud", result.new_chats_kept_in_cloud))
+    others = result.chats_not_loaded - result.new_chats_kept_in_cloud
+    if others > 0:
+        notes.append(screen.p("sync.note.chats_not_loaded", others))
+    return notes
+
+
+class ResultLinks:
+    """A button for every place a full sync's notes send the person.
+
+    A sentence such as "add a path mapping" or "Settings → Sync → New chats
+    from another machine" is only half an instruction; the button is the
+    other half and lands on the very tab or field (`MainWindow.go_to`). Used
+    by every page that shows a full sync's result, so they cannot drift.
+    """
+
+    def __init__(self, screen: Screen) -> None:
+        self.screen = screen
+        self.result = None
+        self.mappings = button(screen.t("sync.link.mappings"))
+        self.mappings.clicked.connect(lambda: screen.host.go_to("settings", "mappings"))
+        self.new_chats = button(screen.t("sync.link.new_chats"))
+        self.new_chats.clicked.connect(lambda: screen.host.go_to("settings", "semantic.new_chats"))
+        self.sessions = button(screen.t("sync.decisions.open"))
+        self.sessions.clicked.connect(self.open_sessions)
+        self.layout = row(self.mappings, self.new_chats, self.sessions)
+        self.show(None)
+
+    def show(self, result) -> None:
+        self.result = result
+        self.mappings.setVisible(bool(result is not None and result.projects_missing_folders))
+        self.new_chats.setVisible(bool(result is not None and result.new_chats_kept_in_cloud))
+        self.sessions.setVisible(bool(
+            result is not None and result.chats_not_loaded - result.new_chats_kept_in_cloud > 0
+        ))
+
+    def open_sessions(self) -> None:
+        """Sessions, for the pair of machines the sync paired chats between."""
+        host = self.screen.host
+        host.go_to("sessions")
+        result = self.result
+        if result is not None and getattr(result, "source", None):
+            host.screen("sessions").open_for(str(result.source), str(result.machine))
 
 
 def run_result(screen: Screen, run) -> str:

@@ -29,6 +29,7 @@ from codexsync.semantic_transfer import (
     IN_PLACE_CATALOG_ABSENT,
     IN_PLACE_CONTAINER,
     IN_PLACE_STATE_CHANGES,
+    MOVES_BRANCH,
     PROVEN_LAYOUTS,
     BranchResolution,
     ResolutionChoice,
@@ -190,7 +191,7 @@ class InPlacePlanTests(unittest.TestCase):
         )
         self._assert_refused(item, IN_PLACE_ARCHIVE_FLAG_DIFFERS)
 
-    def test_a_branch_archived_on_one_side_only_is_not_moved(self) -> None:
+    def test_a_resolution_moves_a_branch_archived_on_one_side(self) -> None:
         path = "sessions/a.jsonl"
         self._branch(self.local_root, path, ["1"])
         self._branch(self.remote_root, "archived_sessions/a.jsonl", ["1", "2"])
@@ -207,7 +208,18 @@ class InPlacePlanTests(unittest.TestCase):
         item = self._plan(
             local, remote, placements=placements, resolutions={blocked.conflict_id: resolution}
         ).items[0]
-        self._assert_refused(item, IN_PLACE_STATE_CHANGES)
+        # The kept branch is archived, so this machine's copy moves into the
+        # archive with it (D-023), and only because the catalogue names it.
+        self.assertEqual(item.action, TransferAction.FAST_FORWARD_LOCAL)
+        self.assertEqual(item.target_relative_path, "archived_sessions/a.jsonl")
+        self.assertIn(MOVES_BRANCH, item.codes)
+        self.assertNotIn(IN_PLACE_STATE_CHANGES, item.codes)
+
+        absent = ThreadPlacements(PlacementStatus.ABSENT, {}, frozenset())
+        refused = self._plan(
+            local, remote, placements=absent, resolutions={blocked.conflict_id: resolution}
+        ).items[0]
+        self._assert_refused(refused, IN_PLACE_CATALOG_ABSENT)
 
     def test_a_local_branch_in_a_container_is_refused(self) -> None:
         item = self._continued(
@@ -335,7 +347,14 @@ class InPlaceApplyTests(unittest.TestCase):
         snapshot = self.root / "backups" / json.loads(manifests[0].read_text(encoding="utf-8"))["snapshot"]
         self.assertEqual((snapshot / Path(*relative.split("/"))).read_bytes(), before)
 
-    def test_a_new_chat_stays_in_the_cloud_copy(self) -> None:
+    def test_a_new_chat_stays_in_the_cloud_copy_when_asked_to(self) -> None:
+        # `keep_in_cloud`; the default carries it (test_new_chats_same_path).
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                "[semantic]\n", '[semantic]\nnew_chats = "keep_in_cloud"\n', 1
+            ),
+            encoding="utf-8",
+        )
         self._branch(self.cloud_dir, "sessions/2026/09/27/rollout-s2.jsonl", "s2", ["one"])
         self._thread_catalogue({})
         plan = self._scan()

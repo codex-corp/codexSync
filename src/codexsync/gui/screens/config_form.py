@@ -153,6 +153,16 @@ class ConfigFormScreen(Screen):
         card_layout.addLayout(form)
         return frame, card_layout
 
+    def field_widget(self, target: str) -> QWidget | None:
+        """The box of a ``section.key`` field, if this page has it."""
+        section, _, key = target.rpartition(".")
+        return self._widgets.get((section, key))
+
+    def reveal(self, target: str) -> None:
+        widget = self.field_widget(target)
+        if widget is not None:
+            self.show_widget(widget)
+
     def decorate_cell(self, spec: Field, cell: QWidget) -> QWidget:
         """Add what a kind of field needs around its box; paths get their help."""
         if spec.kind == "path":

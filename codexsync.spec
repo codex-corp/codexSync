@@ -16,6 +16,10 @@ from exe_version_info import build_version_info  # noqa: E402
 
 entrypoint = project_root / "scripts" / "pyinstaller_entrypoint.py"
 template = project_root / "src" / "codexsync" / "config.example.toml"
+# The window's icon: Explorer, the taskbar and the scheduled tasks show this exe
+# too, and a console build without one looks like a different program. The icon
+# is only a resource of the exe; nothing in it reaches Qt.
+icon = project_root / "src" / "codexsync" / "gui" / "resources" / "codexsync.ico"
 
 
 a = Analysis(
@@ -53,6 +57,7 @@ exe = EXE(
     [],
     name="codexsync",
     version=build_version_info("console"),
+    icon=str(icon),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

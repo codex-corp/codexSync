@@ -42,7 +42,7 @@ class ChatDecisionsNeeded(ConflictError):
 
     def __init__(
         self, *, source: str, target: str, format_migrations: int = 0, held_migrations: int = 0,
-        divergences: int = 0, collisions: int = 0, archive_moves: int = 0,
+        divergences: int = 0, collisions: int = 0,
     ) -> None:
         self.source = source
         self.target = target
@@ -50,8 +50,7 @@ class ChatDecisionsNeeded(ConflictError):
         self.held_migrations = held_migrations
         self.divergences = divergences
         self.collisions = collisions
-        self.archive_moves = archive_moves
-        total = format_migrations + held_migrations + divergences + collisions + archive_moves
+        total = format_migrations + held_migrations + divergences + collisions
         super().__init__(
             f"{total} chat(s) need a decision (`sessions scan --source-machine {source} "
             f"--target-machine {target}` shows which; {format_migrations} are only a newer record "
@@ -64,7 +63,6 @@ class ChatDecisionsNeeded(ConflictError):
             "source": self.source, "target": self.target,
             "format_migrations": self.format_migrations, "held_migrations": self.held_migrations,
             "divergences": self.divergences, "collisions": self.collisions,
-            "archive_moves": self.archive_moves,
         }
 
 

@@ -164,6 +164,24 @@ class SemanticStore:
                 found.append(entry)
         return found
 
+    def own_states(self) -> dict[str, str]:
+        """The state (``ACTIVE``/``ARCHIVED``) this machine last recorded, per session hash.
+
+        It is the state both sides held when they last agreed, which is what
+        tells an archive move's mover from the side that stayed put. An entry
+        that does not verify is left out, which makes this machine follow the
+        mirror for that session.
+        """
+        directory = self.root / MANIFEST_DIR_NAME / self.machine_id
+        if not directory.is_dir():
+            return {}
+        found: dict[str, str] = {}
+        for path in sorted(directory.glob("*.json")):
+            entry = self._read(path)
+            if entry is not None and entry.machine_id == self.machine_id:
+                found[entry.session_hash] = entry.state
+        return found
+
     def confirmed_bases(self) -> set[str]:
         """Sessions some machine recorded as shared, and still vouches for.
 

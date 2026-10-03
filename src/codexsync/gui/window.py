@@ -364,9 +364,17 @@ class MainWindow(QMainWindow):
         self._activity_bar.setVisible(True)
         self._activity_cancel.setVisible(any(cancellable for _, _, cancellable, _, _ in self._active.values()))
 
-    def go_to(self, page: str) -> None:
+    def go_to(self, page: str, target: str | None = None) -> None:
+        """Show ``page``; with ``target``, also the place on it a message named.
+
+        A sentence that sends the person somewhere -- "Settings → Sync → New
+        chats from another machine" -- comes with a button that calls this, so
+        the person lands on the very field, not on a page to search.
+        """
         if page in PAGES:
             self._nav.setCurrentRow(PAGES.index(page))
+            if target:
+                self._screens[page].reveal(target)
 
     def screen(self, page: str) -> Screen:
         return self._screens[page]
@@ -379,6 +387,10 @@ class MainWindow(QMainWindow):
 
     def known_machines(self) -> tuple[str, ...]:
         return self._config_info.machines if self._config_info else ()
+
+    def usual_source(self) -> str | None:
+        """The other machine a full sync pairs chats with, if any has handed off."""
+        return self._config_info.usual_source if self._config_info else None
 
     def config_info(self) -> ConfigInfo | None:
         return self._config_info

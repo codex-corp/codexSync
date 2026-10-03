@@ -22,6 +22,8 @@
   标识出现在两个文件里（`LOCAL_DUPLICATE_SESSION_ID`、`REMOTE_DUPLICATE_SESSION_ID`），
   或者副本会落到一个不属于该会话的文件上（`DESTINATION_OCCUPIED`）。这样的副本绝不会被
   当作不存在：在文件能被正常读取之前，这个会话的任何一侧都不会被写入，其他会话也不会因此停下。
+  例外只有一个：如果 Codex 在新文件中继续了某个对话，而它的线程目录恰好指向两者之一，
+  那个文件就是该对话，另一个保持不动（`STALE_DUPLICATE_BY_CATALOG`）。
 
 ```powershell
 codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --save-plan sessions-plan.json
@@ -125,8 +127,12 @@ codexsync -c config.toml sessions apply --plan sessions-plan.json --confirm-plan
 - 执行**按设计就是部分的**。冲突或目标位置冲突会让整份计划停下来，因为每一个都指向只有
   你才能做的决定。因布局未经验证、因 SQLite 目录或因副本无法使用而被挡住的条目，会被报告
   出来并原地不动。
-- 活动 ↔ 归档的转变在 0.2 里只报告、不执行：这种搬移需要一次删除，而 codexSync 从不删除
-  会话文件。
+- 在一台机器上归档（或取消归档）的对话，在另一台机器上也会同样搬移（`D-023`）。哪一侧
+  发生了变化，从本机关于上一次一致状态的记录中读取，绝不依据时钟；本机没有自己的记录时，
+  跟随云端副本。对话被写到另一台机器存放它的位置，旧文件在已验证的备份之后、在同一个
+  封装内被删除。写入 `.codex` 时，线程目录必须指向被搬移的文件。在一台机器上归档、在另一台
+  上继续的对话需要你来决定（`ARCHIVED_AND_CONTINUED`）。在 Codex 更新之前，目录中的那一行
+  仍指向旧位置；`doctor` 会在 `session_visibility` 中统计这类对话。
 
 ### 写入 `.codex`
 
@@ -149,12 +155,12 @@ Codex 刷新之前，聊天列表可能仍显示旧值；对话本身则从文�
 
 ```toml
 [semantic]
-new_chats = "keep_in_cloud"   # keep_in_cloud | same_path
+new_chats = "same_path"   # same_path | keep_in_cloud
 ```
 
-- `keep_in_cloud`（默认）让它留在云端副本中，报告为 `BLOCKED_UNPROVEN_LAYOUT`：
+- `keep_in_cloud` 让它留在云端副本中，报告为 `BLOCKED_UNPROVEN_LAYOUT`：
   Codex 期望新聊天文件放在哪里，尚未经过[受控实验](../dev/experiments/session-layout-adapter.md)（英文）验证。
-- `same_path` 把它写入 `.codex`，路径与它在来源机器上相对于 `.codex` 的路径相同
+- `same_path`（默认）把它写入 `.codex`，路径与它在来源机器上相对于 `.codex` 的路径相同
   （`sessions/<年>/<月>/<日>/…` 或 `archived_sessions/…`），这正是 0.1 整体复制
   `sessions/` 时的做法。路径是相对的，所以用户名和盘符无关紧要。每个这样的条目都带有
   `NEW_CHAT_SAME_PATH`。该路径上已有的文件永远不会被覆盖（`DESTINATION_OCCUPIED`）；
@@ -169,9 +175,9 @@ Codex 从它的线程目录列出聊天，而 codexSync 不写这个目录，所
 请用 `[[path_mappings]]` 映射文件夹，或移动项目，见[项目](PROJECTS.md)。
 
 写**向云文件夹**不受这道关卡限制：没有任何 Codex 读取那份副本，因此镜像中还没有的分支
-保留它在本地的相对路径。镜像中已有的分支则在原处被改写，即使本地副本放在别处——这里已归档，
-镜像中仍是活动的（`MIRROR_PATH_KEPT`）——因为同一个会话的第二个文件会让两者都从之后的每份
-计划中消失。正是这一点，让过期或缺失的镜像可以被重建出来。
+保留它在本地的相对路径。镜像中已有的分支则在原处被改写，即使本地副本放在别处
+（`MIRROR_PATH_KEPT`），因为同一个会话的第二个文件会让两者都从之后的每份计划中消失；
+只有归档搬移才会改变它的位置（`MOVES_BRANCH`）。正是这一点，让过期或缺失的镜像可以被重建出来。
 
 ## 云端镜像
 

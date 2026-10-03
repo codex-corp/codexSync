@@ -207,11 +207,18 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("FAILED (ConflictError)", text)
         self.assertIn("origin=unattended", text)
         self.assertIn("to_cloud=2", text)
-        self.assertNotIn("sessions", text, "the default family is sync")
+        # Every kind by default: one full sync is a `sync`, a `sessions` and a
+        # `project-sync` run, and listing the first alone read "0 / 0".
+        self.assertIn("sessions", text)
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(main(["-c", str(self.config_path), "history", "--family", "all", "--json"]), 0)
+            self.assertEqual(main(["-c", str(self.config_path), "history", "--family", "sync"]), 0)
+        self.assertNotIn("sessions", out.getvalue())
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main(["-c", str(self.config_path), "history", "--json"]), 0)
         records = json.loads(out.getvalue())
         self.assertEqual([record["family"] for record in records], ["sync", "sessions"])
         self.assertEqual(records[0]["counts"], {"deletions": 0, "to_cloud": 2, "to_local": 0})

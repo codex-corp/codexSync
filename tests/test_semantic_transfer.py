@@ -290,7 +290,9 @@ class TransferPlanTests(unittest.TestCase):
 
         session_hash = without_base.items[0].session_hash
         with_base = self._plan(
-            local, remote, layout_id="test-layout", confirmed_bases={session_hash}
+            local, remote, layout_id="test-layout", confirmed_bases={session_hash},
+            # A move needs the catalogue to name the file being moved.
+            placements=ThreadPlacements(PlacementStatus.AVAILABLE, {"s1": "sessions/a.jsonl"}, frozenset()),
         )
         self.assertEqual(with_base.items[0].action, TransferAction.ARCHIVE_TRANSITION)
 

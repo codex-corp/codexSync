@@ -80,6 +80,9 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         Field("paths", "temp_dir", "path", ""),
     )),
     ("sync", (
+        # First on the tab: it decides whether a chat started on the other
+        # machine reaches this one at all, and messages elsewhere point here.
+        Field("semantic", "new_chats", "choice", "same_path", ("same_path", "keep_in_cloud")),
         Field("sync", "compare", "choice", "mtime", ("mtime", "mtime_hash_fallback")),
         Field("sync", "time_tolerance_seconds", "int", 0, maximum=3600),
         Field("sync", "equal_mtime_action", "choice", "skip", ("skip", "prefer_local", "prefer_cloud", "manual_abort")),
@@ -90,7 +93,6 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         Field("filters", "exclude_globs", "lines", []),
         Field("sync", "direction", "choice", "bidirectional", ("bidirectional", "to_cloud", "to_local")),
         Field("sync", "delete_policy", "choice", "never", ("never", "propagate")),
-        Field("semantic", "new_chats", "choice", "keep_in_cloud", ("keep_in_cloud", "same_path")),
         Field(
             "sync", "session_mode", "choice", "all", ("all", "last_date_only"),
             blocked=("last_date_only",),
@@ -133,6 +135,10 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
     )),
     ("mappings", ()),
     ("service", (
+        # Shown so every key of the template has a place in the window, and
+        # locked like `safety.*`: a sync that overwrites without a backup
+        # would leave `recover` nothing to put back.
+        Field("backup", "backup_before_overwrite", "bool", True, locked=True),
         Field("backup", "retention_days", "int", 30, maximum=36500),
         Field("backup", "max_backups", "int", 0, maximum=100000),
         Field("backup", "compression", "choice", "none", ("none", "zip")),
@@ -808,6 +814,18 @@ class SettingsScreen(ConfigFormScreen):
 
     def apply_alongside(self, model: SettingsModel, value: Any) -> None:
         model.history = value
+
+    def reveal(self, target: str) -> None:
+        """A tab by its id, or a field: its tab first, then the field itself."""
+        tab = target if target in self._tab_ids else next(
+            (tab_id for tab_id, fields in TABS if any(f"{spec.section}.{spec.key}" == target for spec in fields)),
+            None,
+        )
+        if tab is None:
+            return
+        self.tabs.setCurrentIndex(self._tab_ids.index(tab))
+        if tab != target:
+            super().reveal(target)
 
     def _tab_changed(self, index: int) -> None:
         if 0 <= index < len(self._tab_ids):

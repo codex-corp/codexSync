@@ -10,6 +10,20 @@ version through `codexsync.__version__`, which is read from installed package
 metadata.
 
 ### Added
+- **Archived chats follow the other machine** (`D-023`). A chat archived or
+  taken out of the archive on one machine is moved the same way on the other:
+  written where that machine keeps it, the old file removed after a verified
+  backup. Which side moved is read from the last recorded agreement, never
+  from clocks. Before, every such chat stopped the full sync for good while the
+  Sessions page offered nothing to decide; a chat archived on one machine and
+  continued on the other is now the only case that asks.
+- **The Sessions page speaks plainly and knows the other machine.** Instead
+  of raw codes it says what is left out and why — chats new to this machine
+  kept in the cloud copy (with a button to the setting that loads them), copies
+  that cannot be read, archive moves ahead. Opened by hand it now selects the
+  machine the full sync pairs with, found from the shared workspace even
+  without `[[path_mappings]]`; a sync that stops on chats stops only on what
+  this page lists as needing a decision.
 - **Projects travel between machines** (`codexsync projects sync`, `D-022`).
   0.1 copied `.codex-global-state.json` whole; 0.2 stopped (it holds
   per-machine values) and, until now, carried no project at all, so a laptop
@@ -21,7 +35,7 @@ metadata.
   sync — settings, chats and projects — and shows which stage it is in.
 - **A sync that stops on chats says why and leads to the decision.** It
   lists what kind of decisions wait (only a newer record format, continued
-  differently, a file in the way, an archive move) in the window's language
+  differently, a file in the way) in the window's language
   and opens Sessions for exactly that pair of machines. *Backups* can also
   make a copy of `.codex` now, the same job as on *Automation*.
 - **Handing work between machines** (`[handoff]`, `codexsync handoff
@@ -36,8 +50,7 @@ metadata.
   sign-in), reports with system notifications and warns when Codex is started
   while another machine has not handed off. The *Automation* page shows every
   machine and can hand off now. A chat started on the other machine is placed
-  into `.codex` on the receiving one only with `[semantic] new_chats =
-  "same_path"` (below); a handoff says how many it wrote and how many stayed in
+  into `.codex` on the receiving one (`[semantic] new_chats`, below); a handoff says how many it wrote and how many stayed in
   the cloud copy instead of calling the work loaded.
 - **Opening a config from an earlier version says so at once.** The window checks
   the file it opens (or starts with) and shows a banner above every page with
@@ -56,8 +69,9 @@ metadata.
   the exclusion to an existing config (`MISSING_EXCLUDE_CODEX_BINARIES`).
 - **Chats started on another machine can be copied into `.codex`**
   (`[semantic] new_chats = "same_path"`, `D-020`), at the path they have there
-  relative to `.codex`, as 0.1 did. Off by default; a file already at the path
-  is never overwritten. Codex lists such a chat only once it takes the file up
+  relative to `.codex`, as 0.1 did. On by default — carrying a chat started on
+  one machine to the other is what the sync is for; `keep_in_cloud` keeps them
+  in the cloud copy instead. A file already at the path is never overwritten. Codex lists such a chat only once it takes the file up
   itself, so `doctor` reports `session_visibility`: how many chat files Codex's
   catalogue does not list.
 - **A chat continued on the other machine reaches `.codex`** (`IN_PLACE`,
@@ -436,6 +450,28 @@ metadata.
 
 ### Fixed
 
+- **The sync history said "0 / 0" after a sync that carried chats and
+  projects.** A full sync writes three journals — settings files, chats,
+  projects — and the window listed only the first. It now lists every run with
+  what it was, chats and projects record how many went each way (and who
+  started them), an empty run says "no changes", *Home* counts chats too, and
+  `codexsync history` lists every kind by default.
+- **Every message that sends you somewhere has a button that goes there**, to
+  the very tab or field: a full sync's notes (path mappings, new chats, the
+  Sessions page for that pair of machines) on *Synchronisation* and
+  *Automation*, and the links on *Sessions*, *Projects*, *First run*,
+  *Backups* and *Home*. "Settings → New chats from another machine" named a
+  tab that does not exist; the texts now give the whole path.
+- Every key of the shipped config has a place in the window (a test walks the
+  template); *Back up before overwriting* is shown, locked like the other
+  safety settings.
+- Reading the chats is faster: the cloud copy's compressed files are unpacked
+  in parallel and both sides are read at once (about 39 s → 23 s on the
+  machine it was measured on; a full sync reads them twice).
+- The console `codexsync.exe` has the same icon as the window.
+- A chat Codex carried on in a new file, leaving the old one beside it, was
+  blocked for good as "one session id in two files". The file Codex's own
+  thread catalogue names is now the chat; the other is left alone.
 - The mouse wheel no longer changes a number or a drop-down it passes over, or
   switches tabs, while scrolling *Settings* and *Automation*; a field takes the
   wheel only after it has been clicked into.

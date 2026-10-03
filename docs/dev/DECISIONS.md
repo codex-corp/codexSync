@@ -404,6 +404,17 @@ What was decided:
 When the layout experiment (CS-330b) confirms the behaviour, the template moves
 into `PROVEN_LAYOUTS` with the Codex version it was observed on.
 
+**Amended 2026-10-03: `same_path` is the default.** The first full sync on the
+second machine left 192 chats started on the other one in the cloud copy,
+because that machine's config had no `new_chats` line and the default was
+`keep_in_cloud`. The owner: carrying new chats is the purpose of the tool, the
+way 0.1 did it, and a sync that needs a manual switch for every new chat is not
+one. The loader, both templates and the window now default to `same_path`;
+`keep_in_cloud` stays available for a machine that should not receive them.
+Every other rule above is unchanged: a missing catalogue row is still the only
+waived check, and `doctor`'s `session_visibility` is still what shows whether
+Codex lists the chats.
+
 ## D-021: Compiled programs are never synced or copied
 Asked for by the owner on 2026-09-29, after `plugins/.plugin-appserver/`
 turned out to have carried `codex.exe`, `codex-command-runner.exe`, the sandbox
@@ -476,3 +487,57 @@ Checked against the real global state, in memory: the publication carries 19
 projects, 17 ordered, 2 pinned, 4 of 4 bindings; merging it into itself
 writes nothing; into a simulated laptop with 3 of them under other ids plus
 one of its own it adds 16, matches 3 by folder, and the result validates.
+
+## D-023: An archive move follows the other machine
+Asked for by the owner on 2026-10-02 ("archived chats go to the archive too"),
+after the laptop's first full sync stopped for good on 11 chats the desktop
+had archived. The sync said a person had to decide them on the Sessions page;
+that page listed them as transferable and offered no choice, so nothing could
+ever unblock it. Until then an `ARCHIVE_TRANSITION` was classified and refused
+at apply, because the move needs a delete. This amends D-019 ("no move hides
+inside it") and the `delete_policy` note under D-013: the move is applied by
+`sessions apply` and the full sync, never by plain `sync`.
+
+What was decided:
+
+- **Which side moved is read, never guessed from clocks.** This machine's own
+  semantic manifest entry records the state both sides last agreed on; the
+  side that still holds it did not move (`ARCHIVE_FOLLOWS_REMOTE` /
+  `ARCHIVE_FOLLOWS_LOCAL`). With no entry of its own, as on a laptop that had
+  never transferred a chat, this machine follows the mirror, whose state
+  another machine's agreement vouches for (the base `ARCHIVE_TRANSITION`
+  already requires).
+- **A move is a whole-branch copy plus a delete, in the sync envelope.** The
+  branch is written where the followed side keeps it (the other machine's
+  relative path, as `new_chats = same_path` places a chat), the old file is
+  backed up and the backup verified before anything is replaced, and it is
+  removed only after every copy is in place (`MOVES_BRANCH`). The mirror
+  keeps its container. A resolved conflict whose kept branch sits in the
+  other state folder moves the same way.
+- **The catalogue still has to name the file that moves.** Into `.codex` a
+  move needs `threads.rollout_path` to name exactly the local file and its
+  archive flag to agree with the folder (`IN_PLACE_CATALOG_ABSENT`,
+  `CATALOG_PLACES_ELSEWHERE`, `IN_PLACE_ARCHIVE_FLAG_DIFFERS` refuse). The
+  new path must be free (`DESTINATION_OCCUPIED`).
+- **Archived on one machine and continued on the other is a decision.** When
+  the side that did not move holds records the moved side lacks,
+  `ARCHIVED_AND_CONTINUED` makes it an ordinary conflict: keeping either
+  branch keeps its state.
+- **SQLite is still not written.** After a move the catalogue row names the
+  old path and the old archive flag until Codex rewrites it; `doctor`'s
+  `session_visibility` counts such chats. If Codex does not follow, the file is
+  in `archived_sessions/` (or back in `sessions/`) and the old one is in the
+  backup snapshot.
+
+At the same time (CS-348): one session id in two files on this machine is
+settled by the catalogue when it names exactly one of them. Observed on the
+reference machine: `rollout-…T11-06-11-<id>.jsonl` and
+`rollout-…T16-26-54-<id>_<other id>.jsonl`, both opening with the same
+`session_meta`, the catalogue naming the second — Codex carried the thread on
+in a new file and left the old one. The named copy is the branch; the other
+is marked `STALE_DUPLICATE_BY_CATALOG`, never transferred, never touched. No
+catalogue, or one naming neither copy, leaves the duplicate blocked as before.
+
+Checked against the laptop's plan of 2026-10-02: the 11 transitions carry no
+own entry, so all follow the mirror into `archived_sessions/`, and 10 of them
+are byte-identical.

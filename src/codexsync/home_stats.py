@@ -64,6 +64,10 @@ class SyncStats:
     failed: int
     to_cloud: int
     to_local: int
+    #: Chats the same runs carried: a full sync writes them under its own
+    #: journal (`sessions`), so the file counts above never include them.
+    chats_to_cloud: int = 0
+    chats_to_local: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +134,11 @@ def _sync_stats(journals: list[JournalInfo], now: datetime) -> SyncStats:
     runs.sort(key=lambda item: item.created_at_utc or "", reverse=True)
     since = now - timedelta(days=RECENT_DAYS)
     recent = [item for item in runs if (_parse_utc(item.created_at_utc) or since) > since]
+    chats = [
+        item for item in journals
+        if item.family == "sessions" and item.readable and item.state == "COMMITTED"
+        and (_parse_utc(item.created_at_utc) or since) > since
+    ]
     failed = [item for item in recent if not item.readable or item.state != "COMMITTED"]
     committed = [item for item in recent if item.readable and item.state == "COMMITTED"]
     return SyncStats(
@@ -138,6 +147,8 @@ def _sync_stats(journals: list[JournalInfo], now: datetime) -> SyncStats:
         failed=len(failed),
         to_cloud=sum(int((item.counts or {}).get("to_cloud", 0)) for item in committed),
         to_local=sum(int((item.counts or {}).get("to_local", 0)) for item in committed),
+        chats_to_cloud=sum(int((item.counts or {}).get("to_cloud", 0)) for item in chats),
+        chats_to_local=sum(int((item.counts or {}).get("to_local", 0)) for item in chats),
     )
 
 

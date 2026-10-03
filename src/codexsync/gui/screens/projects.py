@@ -93,6 +93,11 @@ class ProjectsScreen(Screen):
         self.refresh_button = button(self.t("action.refresh"))
         self.refresh_button.clicked.connect(self.refresh)
         self.banner.actions.addWidget(self.refresh_button)
+        # The banner's "pin them from Chat bindings" comes with the way there.
+        self.lost_button = button(self.t("projects.lost.open"))
+        self.lost_button.clicked.connect(lambda: self.host.go_to("chats"))
+        self.lost_button.setVisible(False)
+        self.banner.actions.addWidget(self.lost_button)
         inner.addWidget(label(self.t("projects.list.caption"), "muted", wrap=True))
         self.projects = table([
             self.t("projects.column.name"),
@@ -528,6 +533,7 @@ class ProjectsScreen(Screen):
         self.scan_button.setEnabled(not (model.scan_busy or model.action_busy))
 
         outcome = model.directory
+        self.lost_button.setVisible(False)
         if model.busy:
             self.banner.show_message("neutral", self.t("projects.loading"), self.progress_text(), palette)
             self.projects.setRowCount(0)
@@ -572,6 +578,7 @@ class ProjectsScreen(Screen):
                 self.p("chats.projects", len(directory.projects)),
                 self.p("projects.lost", lost),
             ]))
+            self.lost_button.setVisible(bool(lost))
             if lost:
                 self.banner.show_message("attention", self.p("chats.stranded.title", lost), self.t("projects.lost.detail"), palette)
             else:

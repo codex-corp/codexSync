@@ -26,7 +26,10 @@ the cloud folder and classifies each one:
   `REMOTE_DUPLICATE_SESSION_ID`), or a copy would land on a file that is not
   this session's (`DESTINATION_OCCUPIED`). Such a copy is never taken for a
   missing one: nothing is written for that session on either side until the file
-  reads cleanly, and the other sessions are not held up by it.
+  reads cleanly, and the other sessions are not held up by it. One exception:
+  when Codex carried a chat on in a new file and its thread catalogue names
+  exactly one of the two, that one is the chat and the other is left alone
+  (`STALE_DUPLICATE_BY_CATALOG`).
 
 ```powershell
 codexsync -c config.toml sessions scan --source-machine desktop --target-machine laptop --save-plan sessions-plan.json
@@ -148,8 +151,16 @@ codexsync -c config.toml sessions apply --plan sessions-plan.json --confirm-plan
   whole plan, because each names a decision only you can make. Items blocked on
   an unproven layout, on the SQLite catalogue or on a copy that cannot be used
   are reported and left where they are.
-- Active ↔ archive transitions are reported but not applied in 0.2: the move
-  needs a delete, and codexSync never deletes a session file.
+- A chat archived (or taken out of the archive) on one machine is moved the
+  same way on the other (`D-023`). Which side moved is read from this machine's
+  record of the last agreement, never from clocks; a machine with no record of
+  its own follows the cloud copy. The chat is written where the other machine
+  keeps it and the old file is removed — after it is in a verified backup, in
+  the same envelope. Into `.codex` this needs the thread catalogue to name the
+  file being moved. A chat archived on one machine and continued on the other
+  is a decision (`ARCHIVED_AND_CONTINUED`). The catalogue row still names the
+  old place until Codex updates it; `doctor` counts such chats in
+  `session_visibility`.
 
 ### Writing into `.codex`
 
@@ -177,13 +188,13 @@ Codex refreshes them; the conversation itself is read from the file.
 
 ```toml
 [semantic]
-new_chats = "keep_in_cloud"   # keep_in_cloud | same_path
+new_chats = "same_path"   # same_path | keep_in_cloud
 ```
 
-- `keep_in_cloud` (the default) leaves it in the cloud copy, reported as
+- `keep_in_cloud` leaves it in the cloud copy, reported as
   `BLOCKED_UNPROVEN_LAYOUT`: where Codex expects a new chat file has not been
   proven by the [controlled experiment](../dev/experiments/session-layout-adapter.md).
-- `same_path` writes it into `.codex` at the path it has on the machine it came
+- `same_path` (the default) writes it into `.codex` at the path it has on the machine it came
   from, relative to `.codex` — `sessions/<year>/<month>/<day>/…` or
   `archived_sessions/…` — which is what 0.1 did by copying `sessions/` whole.
   The user name and drive do not matter, since the path is relative. Each such
@@ -205,9 +216,9 @@ changed for that (a record's bytes are its identity); map the folder with
 Writing **towards the cloud folder** is not gated: no Codex reads that copy, so a
 branch the mirror does not hold yet keeps the relative path it has locally. A
 branch it already holds is rewritten where it is, even when the local copy lives
-elsewhere — archived here, still active in the mirror (`MIRROR_PATH_KEPT`) —
-because a second file for one session would make both drop out of every later
-plan. This is what lets a stale or missing mirror be rebuilt.
+elsewhere (`MIRROR_PATH_KEPT`), because a second file for one session would
+make both drop out of every later plan; only an archive move relocates it
+(`MOVES_BRANCH`). This is what lets a stale or missing mirror be rebuilt.
 
 ## The cloud mirror
 

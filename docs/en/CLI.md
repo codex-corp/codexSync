@@ -54,7 +54,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `repair-projects apply` | **yes** | Apply one exact plan, quoted by its id | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
 | `project-move scan` | no | Hash a project and plan copying it to a new folder | [Projects](PROJECTS.md#moving-a-projects-files) |
 | `project-move apply` | **yes** | Copy, verify, then point Codex at the new folder | [Projects](PROJECTS.md#moving-a-projects-files) |
-| `history` | no | List past syncs (or every kind of write) from their journals | [Sync](SYNC.md#history) |
+| `history` | no | List past writes of every kind (or one kind) from their journals | [Sync](SYNC.md#history) |
 | `recover inspect` | no | Read one mutation journal without side effects | [Recovery](RECOVERY.md#interrupted-mutations) |
 | `recover resume` / `rollback` | **yes** | Close an interrupted mutation | [Recovery](RECOVERY.md#interrupted-mutations) |
 

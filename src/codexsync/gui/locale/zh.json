@@ -195,12 +195,22 @@
   "sync.running": "正在执行…",
   "sync.done.dry": "试运行结束。没有复制也没有写入任何内容。",
   "sync.tab.history": "历史",
-  "sync.history.caption": "每一次“同步”——来自本窗口、命令行或登录时的任务。试运行不写入任何内容，不会列在这里；在第一次写入前就停止的运行（Codex 已打开、manual_abort 下的冲突）也不会。数据来自与“恢复”页面相同的操作日志。",
+  "sync.history.caption": "每一次写入了内容的运行——来自本窗口、命令行、任务或其他页面的“同步”。一次完整同步显示为三行：设置文件、聊天和项目。试运行不写入任何内容，不会列在这里；在第一次写入前就停止的运行（Codex 已打开、manual_abort 下的冲突）也不会。数据来自与“恢复”页面相同的操作日志。",
   "sync.history.empty": "还没有运行过同步。",
   "sync.history.column.when": "开始时间",
   "sync.history.column.result": "结果",
   "sync.history.column.origin": "启动方",
   "sync.history.column.changes": "变更",
+  "sync.history.no_changes": "无变化",
+  "sync.history.family.project-move": "项目迁移",
+  "sync.history.family.guardian-restore": "全局状态还原",
+  "sync.history.family.restore": "从备份还原",
+  "sync.history.family.repair": "项目修复",
+  "sync.history.family.chats": "对话归属",
+  "sync.history.family.project-sync": "项目",
+  "sync.history.family.sessions": "聊天",
+  "sync.history.family.sync": "设置文件",
+  "sync.history.column.kind": "内容",
   "sync.history.column.backup": "备份",
   "sync.history.result.PREPARED": "在备份前中断",
   "sync.history.result.BACKED_UP": "在备份后中断",
@@ -228,6 +238,9 @@
   "sync.count.deleted": {
     "other": "已删除 {count} 个"
   },
+  "sync.count.changes": {
+    "other": "{count} 处变更"
+  },
   "overview.last_sync": "上次同步：{when}，{result}。",
   "overview.last_sync.none": "上次同步：尚未进行。",
   "overview.open_history": "历史",
@@ -247,9 +260,6 @@
   "sync.decisions.collisions": {
     "other": "{count} 个聊天会落到本机已存在的文件上"
   },
-  "sync.decisions.archive_moves": {
-    "other": "{count} 个聊天在其中一台电脑上被归档或取消归档"
-  },
   "sync.count.chats": {
     "other": "{count} 个聊天"
   },
@@ -262,6 +272,11 @@
   "sync.note.chats_not_loaded": {
     "other": "有 {count} 个聊天只留在云端副本中；原因见「会话」页面。"
   },
+  "sync.note.new_chats_in_cloud": {
+    "other": "有 {count} 个对本机而言是新的聊天留在了云端副本中：加载新对话已关闭（「设置」→「同步」→「来自另一台机器的新对话」）。"
+  },
+  "sync.link.new_chats": "打开该设置",
+  "sync.link.mappings": "添加路径映射",
   "association.BOUND": "已固定",
   "association.DERIVED": "按路径",
   "association.DERIVED_VIA_MAPPING": "仅按规则",
@@ -355,6 +370,23 @@
   },
   "sessions.decide.detail": "分叉永远不会被合并，也不会按日期决定。选中它，选择保留哪一侧，扫描会带着你的决定重新进行。",
   "sessions.clean.title": "没有需要决定的内容",
+  "sessions.partial.title": "并非全部都会转移",
+  "sessions.open_settings": "打开该设置",
+  "sessions.note.new_in_cloud": {
+    "other": "有 {count} 个对话只存在于另一台机器上，仍留在云端副本中：本机关闭了加载新对话。开启方法：「设置」→「同步」→「来自另一台机器的新对话」→「复制到 .codex」。"
+  },
+  "sessions.note.held": {
+    "other": "有 {count} 个对话不会转移到本机：本机的 Codex 无法确认其文件位置（原因见该行的提示）。"
+  },
+  "sessions.note.unreadable": {
+    "other": "有 {count} 个对话不会转移：某个副本无法读取，或该对话分散在多个文件中。"
+  },
+  "sessions.note.moves": {
+    "other": "有 {count} 个对话将按另一台机器的状态归档或取消归档。"
+  },
+  "sessions.note.stale": {
+    "other": "有 {count} 个对话在本机存在两个文件：转移 Codex 指向的那个，另一个保持不动。"
+  },
   "sessions.choice.label": "对所选冲突的决定",
   "sessions.choice.KEEP_LOCAL": "保留本机的分支",
   "sessions.choice.KEEP_REMOTE": "保留云端的分支",
@@ -416,6 +448,7 @@
     "other": "{count} 个对话仅按规则归属"
   },
   "projects.lost.detail": "可在「对话归属」中固定它们，或构建下面的修复计划。",
+  "projects.lost.open": "打开「对话归属」",
   "projects.repair.title": "换机之后的修复",
   "projects.repair.caption": "会话记录的文件夹会经过 [[path_mappings]] 转换。计划会固定对话，或为搬走的项目重新指定根目录 —— 重新指定时总会同时固定仍在旧根目录下的每个对话，因此不会有对话消失。",
   "projects.repair.scan": "构建修复计划",
@@ -623,6 +656,7 @@
   "first_run.created": "已创建 {path}。",
   "first_run.after.title": "接下来",
   "first_run.after.body": "打开「概览」并刷新：每项检查都会读取新文件。在另一台机器上同步之前等待云客户端同步完成，仍然由你负责。",
+  "first_run.after.open": "打开「概览」",
   "settings.reload": "从磁盘重新读取",
   "settings.config.switch": "打开另一个 config.toml…",
   "settings.loading": "正在读取 config.toml…",
@@ -716,6 +750,7 @@
   "settings.field.scheduler.jitter_seconds": "随机延迟（秒）",
   "settings.field.scheduler.sync_at_login": "登录后同步设置",
   "settings.field.backup.retention_days": "备份保留天数",
+  "settings.field.backup.backup_before_overwrite": "覆盖前先备份",
   "settings.field.backup.max_backups": "备份数量上限",
   "settings.field.backup.compression": "备份格式",
   "settings.field.semantic.root_dir": "会话存储",
@@ -738,6 +773,7 @@
   "settings.reason.sync.session_mode": "「只要最新日期」可能丢掉分支，因此它只对 plan 可读：任何会写入的命令都会拒绝设置了它的配置，退出码为 4。",
   "settings.reason.sync.mode": "只有冷同步：codexSync 只在 Codex 关闭时写入 Codex 状态（AI_RULES 2，D-001）。",
   "settings.reason.safety.require_codex_stopped": "始终开启：在 Codex 运行时同步，正是这个工具存在的意义所在要防止的事故（AI_RULES 2）。",
+  "settings.reason.backup.backup_before_overwrite": "始终开启：同步替换的每个文件都会先备份并校验，以便 recover 能把它放回去。",
   "settings.reason.safety.fail_on_unknown": "始终开启：状态不确定时，codexSync 不写入任何内容直接退出（AI_RULES 3）。",
   "settings.hint.sync.direction": "单向运行不会碰另一侧，也不会记录关于它的任何事：被跳过的内容仍是未同步的，因此之后的双向运行依然会看到差异。",
   "settings.field.sync.direction": "方向",
@@ -1040,6 +1076,7 @@
     "other": "{count} 次未完成"
   },
   "home.sync.files": "文件：上传到云端 {to_cloud} 个，从云端下载 {to_local} 个",
+  "home.sync.chats": "聊天：上传到云端 {to_cloud} 个，写入 Codex {to_local} 个",
   "home.state.title": "聊天和项目",
   "home.state.open": "聊天绑定",
   "home.state.recount": "重新统计",
@@ -1212,9 +1249,6 @@
   "automation.handoff.done": "完成：写入 {files} 个文件和 {chats} 个聊天。",
   "automation.handoff.done.loaded": "已载入来自 {machine} 的交接。",
   "automation.handoff.done.handed_off": "本机的工作已在云端副本中。",
-  "automation.handoff.done.left": {
-    "other": "{count} 个聊天仅保留在云端副本中：在另一台电脑上新开的聊天，只有在「设置 › 同步」中把「来自另一台机器的新对话」设为复制时才会放入 Codex。"
-  },
   "automation.handoff.done.new": {
     "other": "{count} 个本机从未有过的聊天已复制到 Codex。请启动 Codex，然后 doctor 会显示它是否列出了这些聊天。"
   }

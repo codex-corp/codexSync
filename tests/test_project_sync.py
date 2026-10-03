@@ -237,6 +237,13 @@ class TwoMachineTests(_Workspace):
         self.assertFalse(sync_projects(laptop).plan.writes)
         self.assertFalse(sync_projects(desktop).plan.writes)
 
+        # The history says what the run did, not only that it ran.
+        from codexsync.recovery import list_history
+
+        (run,) = list_history(laptop, family="project-sync")[-1:]
+        self.assertEqual(run.counts["projects_added"], 2)
+        self.assertEqual(run.origin, "handoff")
+
     def test_a_list_already_taken_is_not_reapplied_over_a_local_change(self) -> None:
         desktop, desktop_codex = self.machine("desktop")
         laptop, laptop_codex = self.machine("laptop")

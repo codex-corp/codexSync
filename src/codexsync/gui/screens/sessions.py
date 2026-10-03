@@ -87,7 +87,12 @@ class SessionsScreen(Screen):
         if not m.target:
             m.target = self.host.machine_id() or ""
         if not m.source:
-            m.source = next((name for name in machines if name != m.target), "")
+            # The pair a full sync would use, so the page reached by hand shows
+            # what the page reached from a stopped sync shows (CS-345).
+            usual = self.host.usual_source()
+            m.source = usual if usual and usual != m.target else next(
+                (name for name in machines if name != m.target), ""
+            )
         self.source = machine_combo(machines, m.source, placeholder=self.t("machines.source"))
         self.target = machine_combo(machines, m.target, placeholder=self.t("machines.target"))
         for combo in (self.source, self.target):
@@ -104,6 +109,12 @@ class SessionsScreen(Screen):
 
         self.banner = Banner()
         self.body.addWidget(self.banner)
+        # Shown when new chats stay in the cloud only because of a setting: the
+        # one thing on this page a person can change about it (CS-347).
+        self.settings_button = button(self.t("sessions.open_settings"))
+        self.settings_button.clicked.connect(lambda: self.host.go_to("settings", "semantic.new_chats"))
+        self.settings_button.setVisible(False)
+        self.body.addLayout(row(self.settings_button))
 
         self.summary = label()
         frame, inner = card(self.t("sessions.branches.title"), self.summary)
@@ -635,6 +646,7 @@ class SessionsScreen(Screen):
         self._fill_scope_tree()
         self._render_scope()
 
+        self.settings_button.setVisible(False)
         if model.busy:
             self.banner.show_message("neutral", self.t("sessions.scanning"), self.progress_text(), palette)
         elif model.scan is None:
@@ -648,10 +660,18 @@ class SessionsScreen(Screen):
                 self.banner.show_message("attention", self.t("sessions.volatile.title"), self.t("sessions.volatile.detail"), palette)
             elif decide:
                 self.banner.show_message("attention", self.p("sessions.decide.title", decide), self.t("sessions.decide.detail"), palette)
-            elif plan.codes:
-                self.banner.show_message("attention", self.t("common.codes", codes=", ".join(plan.codes)), "", palette)
             else:
-                self.banner.show_message("ok", self.t("sessions.clean.title"), "", palette)
+                # Sentences, never the plan's raw codes: half of those are not
+                # refusals at all (`IN_PLACE`, `CWD_ABSENT_HERE`), CS-346.
+                notes = plan_notes(plan)
+                left_out = any(key in LEFT_OUT_NOTES for key, _ in notes)
+                self.banner.show_message(
+                    "attention" if left_out else "ok",
+                    self.t("sessions.partial.title" if left_out else "sessions.clean.title"),
+                    "\n".join(self.p(f"sessions.note.{key}", count) for key, count in notes),
+                    palette,
+                )
+                self.settings_button.setVisible(any(key == "new_in_cloud" for key, _ in notes))
         self._fill()
         self._render_plan()
         self._render_resolution()
@@ -759,6 +779,33 @@ class SessionsScreen(Screen):
         self.status.setText(text)
         set_tone(self.status, tone, palette)
         self.status.setVisible(bool(text))
+
+
+#: Notes about chats a plan does not carry, as opposed to notes about what it
+#: does beyond a plain copy.
+LEFT_OUT_NOTES = frozenset({"new_in_cloud", "held", "unreadable"})
+
+
+def plan_notes(plan) -> list[tuple[str, int]]:
+    """What a plan leaves out or does beyond copying: (`sessions.note.*` key, count).
+
+    Counted from the items, so the page says the same thing whatever codes a
+    plan happens to collect at its own level.
+    """
+    counts = {"new_in_cloud": 0, "held": 0, "unreadable": 0, "moves": 0, "stale": 0}
+    for item in plan.items:
+        action = item.action.value
+        if action == "BLOCKED_UNPROVEN_LAYOUT" and "SESSION_ON_ONE_SIDE_ONLY" in item.codes:
+            counts["new_in_cloud"] += 1
+        elif action in {"BLOCKED_UNPROVEN_LAYOUT", "BLOCKED_UNSUPPORTED_BACKEND"}:
+            counts["held"] += 1
+        elif action == "BLOCKED_INVALID_BRANCH":
+            counts["unreadable"] += 1
+        elif action == "ARCHIVE_TRANSITION" or (item.action.writes and "MOVES_BRANCH" in item.codes):
+            counts["moves"] += 1
+        if "STALE_DUPLICATE_BY_CATALOG" in item.codes:
+            counts["stale"] += 1
+    return [(key, count) for key, count in counts.items() if count]
 
 
 def _format_migrations(plan) -> tuple[int, int]:

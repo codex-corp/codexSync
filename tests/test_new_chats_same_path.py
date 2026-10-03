@@ -47,7 +47,7 @@ class SettingTests(unittest.TestCase):
     def test_every_setting_value_has_a_layout(self) -> None:
         self.assertEqual(tuple(NEW_CHATS_LAYOUTS), NEW_CHATS_VALUES)
 
-    def test_the_default_keeps_the_id_plans_had_before(self) -> None:
+    def test_keep_in_cloud_keeps_the_id_plans_had_before(self) -> None:
         self.assertEqual(layout_for_new_chats("keep_in_cloud"), "unproven")
         self.assertEqual(layout_for_new_chats("same_path"), SAME_PATH_LAYOUT_ID)
 
@@ -59,6 +59,19 @@ class SettingTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         literal = "(" + ", ".join(f'"{value}"' for value in NEW_CHATS_VALUES) + ")"
         self.assertIn(f'Field("semantic", "new_chats", "choice", "{NEW_CHATS_VALUES[0]}", {literal})', source)
+
+    def test_new_chats_are_carried_unless_the_config_says_otherwise(self) -> None:
+        # D-020 amendment, 2026-10-03: a second machine whose config had no
+        # `new_chats` line kept 192 chats from the first one in the cloud copy.
+        # Carrying them is what the sync is for, so leaving the line out means
+        # `same_path`, in the loader, the templates and the window alike.
+        from codexsync.models import SemanticConfig
+
+        self.assertEqual(NEW_CHATS_VALUES[0], "same_path")
+        self.assertEqual(SemanticConfig(Path(".")).new_chats, "same_path")
+        root = Path(__file__).resolve().parents[1]
+        for template in (root / "config.example.toml", root / "src" / "codexsync" / "config.example.toml"):
+            self.assertIn('new_chats = "same_path"', template.read_text(encoding="utf-8"))
 
     def test_same_path_is_not_a_proven_layout(self) -> None:
         # It was seen working under 0.1, not in the controlled run.
@@ -279,14 +292,23 @@ class SamePathApplyTests(unittest.TestCase):
         rescan = self._scan()
         self.assertEqual(rescan.items[0].action, TransferAction.NOOP)
 
-    def test_the_default_leaves_it_in_the_cloud(self) -> None:
-        self._write_config("")
+    def test_keep_in_cloud_leaves_it_in_the_cloud(self) -> None:
+        self._write_config('new_chats = "keep_in_cloud"')
         self._mirror_branch("sessions/2026/09/27/rollout-s2.jsonl.xz", "s2")
         self._thread_catalogue({})
         plan = self._scan()
         self.assertEqual(plan.items[0].action, TransferAction.BLOCKED_UNPROVEN_LAYOUT)
         self.assertEqual(self._apply(plan), 0)
         self.assertFalse((self.local_dir / "sessions").exists())
+
+    def test_without_the_line_a_new_chat_is_written(self) -> None:
+        # The default (D-020 amendment): a config that never mentions it carries it.
+        self._write_config("")
+        self._mirror_branch("sessions/2026/09/27/rollout-s2.jsonl.xz", "s2")
+        self._thread_catalogue({})
+        plan = self._scan()
+        self.assertEqual(plan.items[0].action, TransferAction.FAST_FORWARD_LOCAL, plan.items[0].codes)
+        self.assertIn(NEW_CHAT_SAME_PATH, plan.items[0].codes)
 
     def test_an_unknown_value_is_a_config_error(self) -> None:
         self._write_config('new_chats = "everywhere"')

@@ -127,8 +127,9 @@ The cloud → local and local → cloud plan.
   applies the whole plan.
 - Files changed on both sides are listed as conflicts and decided by
   [`conflict.policy`](SYNC.md#conflicts).
-- The **History** tab lists past syncs: when, result, who started them, what
-  they copied and their backup. See [Synchronisation → History](SYNC.md#history).
+- The **History** tab lists past runs: when, what (settings files, chats,
+  projects — one full sync is three rows), result, who started them, what they
+  carried and their backup. See [Synchronisation → History](SYNC.md#history).
 
 See [Synchronisation](SYNC.md).
 

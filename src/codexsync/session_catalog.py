@@ -1,20 +1,38 @@
 """Streaming, read-only catalog of active and archived Codex sessions."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import json
 import os
 from pathlib import Path
+import threading
 from typing import Iterator
 
 from .fs_links import is_link
-from .jsonl_codec import JSONL_READ_ERRORS, is_branch_file, logical_name, logical_relative_path, open_jsonl
+from .jsonl_codec import (
+    JSONL_READ_ERRORS,
+    JsonlCodec,
+    codec_of,
+    is_branch_file,
+    logical_name,
+    logical_relative_path,
+    open_jsonl,
+)
 from .progress import ProgressCallback, report
 
 
 DEFAULT_MAX_JSONL_LINE_BYTES = 64 * 1024 * 1024
+
+#: Compressed files unpacked at once. Unpacking the mirror's xz containers is
+#: most of a mirror scan (19 s of 28 s on the machine this was measured on) and
+#: releases the GIL, so threads run it in parallel: 30 s -> 14 s with four.
+#: A plain file is the opposite -- parsing its JSON holds the GIL, and four
+#: threads made a 9 s scan of `.codex` take 10-13 s -- so plain files stay on
+#: the calling thread.
+SCAN_WORKERS = max(1, min(4, os.cpu_count() or 1))
 
 
 class SessionState(str, Enum):
@@ -112,11 +130,39 @@ def scan_sessions(
 
     total = len(found)
     report(progress, phase, 0, total)
-    for done, (path, state) in enumerate(found, start=1):
-        descriptors.append(
-            _scan_jsonl(path, root, state, max_line_bytes, volatile, source_machine)
-        )
-        report(progress, phase, done, total)
+    packed = {
+        index for index, (path, _) in enumerate(found)
+        if codec_of(path) not in (None, JsonlCodec.NONE)
+    }
+    if min(SCAN_WORKERS, len(packed)) <= 1:
+        packed = set()
+    # Each file is still read whole by one thread, exactly as before; only the
+    # order they finish in varies. The result keeps the order they were found
+    # in, so the catalogue never depends on timing, and progress is reported
+    # from this thread, which is the caller's.
+    results: list[SessionDescriptor | None] = [None] * total
+    done = 0
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(SCAN_WORKERS, len(packed))), thread_name_prefix="codexsync-scan"
+    ) as pool:
+        queued = {
+            pool.submit(
+                _scan_jsonl, found[index][0], root, found[index][1], max_line_bytes, volatile, source_machine
+            ): index
+            for index in sorted(packed)
+        }
+        # Plain files are read here while the pool unpacks the others.
+        for index, (path, state) in enumerate(found):
+            if index in packed:
+                continue
+            results[index] = _scan_jsonl(path, root, state, max_line_bytes, volatile, source_machine)
+            done += 1
+            report(progress, phase, done, total)
+        for future in as_completed(queued):
+            results[queued[future]] = future.result()
+            done += 1
+            report(progress, phase, done, total)
+    descriptors.extend(item for item in results if item is not None)
 
     by_id: dict[str, list[SessionDescriptor]] = {}
     for item in descriptors:
@@ -398,3 +444,52 @@ def _is_reparse(path: Path) -> bool:
     except OSError:
         return True
     return is_link(path, info)
+
+
+def scan_both_sides(
+    local_root: Path,
+    remote_root: Path,
+    *,
+    local_machine: str | None,
+    remote_machine: str | None,
+    max_line_bytes: int = DEFAULT_MAX_JSONL_LINE_BYTES,
+    volatile: bool = False,
+    progress: ProgressCallback | None = None,
+) -> tuple[SessionCatalog, SessionCatalog]:
+    """`.codex` and the cloud mirror, read at the same time. Reads only.
+
+    One after the other they took 9 s + 30 s on the machine this was measured
+    on, and a full sync reads both twice (the plan, then its rebuild before the
+    write). The two hardly compete: `.codex` is plain JSONL parsed on the
+    calling thread, the mirror is mostly xz unpacking, which releases the GIL.
+    Each catalogue is exactly what `scan_sessions` returns for its side; the
+    progress is one phase, ``sessions``, over both.
+    """
+    lock = threading.Lock()
+    seen: dict[str, tuple[int, int]] = {}
+
+    def side(name: str) -> ProgressCallback | None:
+        if progress is None:
+            return None
+
+        def callback(_phase: str, done: int, total: int) -> None:
+            # Under the lock, so the two sides never report a smaller "done"
+            # after a larger one.
+            with lock:
+                seen[name] = (done, total)
+                report(
+                    progress, "sessions",
+                    sum(item[0] for item in seen.values()), sum(item[1] for item in seen.values()),
+                )
+        return callback
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="codexsync-scan-mirror") as pool:
+        remote = pool.submit(
+            scan_sessions, remote_root, max_line_bytes=max_line_bytes, volatile=volatile,
+            source_machine=remote_machine, progress=side("remote"),
+        )
+        local = scan_sessions(
+            local_root, max_line_bytes=max_line_bytes, volatile=volatile,
+            source_machine=local_machine, progress=side("local"),
+        )
+        return local, remote.result()

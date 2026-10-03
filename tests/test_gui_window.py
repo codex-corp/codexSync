@@ -729,16 +729,66 @@ class OverviewSideTests(_OverviewCase):
         self.assertIn(window.catalog.plural("common.minutes", 15), screen.automation_line.text())
 
 
-def _full_sync_result(*, added: int = 0, missing: int = 0):
+def _full_sync_result(*, added: int = 0, missing: int = 0, not_loaded: int = 0, new_in_cloud: int = 0):
     from types import SimpleNamespace
 
     return SimpleNamespace(
         sync_actions=2, session_actions=1, projects_added=added, projects_missing_folders=missing,
-        chats_not_loaded=0,
+        chats_not_loaded=not_loaded, new_chats_kept_in_cloud=new_in_cloud,
+        machine="laptop", source="machine-a",
     )
 
 
 class SyncTests(_WindowTestCase):
+    def test_new_chats_kept_in_the_cloud_are_said_apart_from_the_rest(self) -> None:
+        # CS-347: the part of "stayed in the cloud copy" that a setting changes.
+        from codexsync.gui.screens.sync import full_sync_result
+
+        window, _ = self.make()
+        text = full_sync_result(window.screen("sync"), _full_sync_result(not_loaded=191, new_in_cloud=190))
+        self.assertIn(window.catalog.plural("sync.note.new_chats_in_cloud", 190), text)
+        self.assertIn(window.catalog.plural("sync.note.chats_not_loaded", 1), text)
+
+    def test_every_note_comes_with_a_button_to_the_place_it_names(self) -> None:
+        # 2026-10-03: "Settings -> New chats from another machine" sent the
+        # owner looking for a tab that does not exist. A sentence that points
+        # somewhere has a button, and the button lands on the very field.
+        window, controller = self.make()
+        controller.outcomes["handoff_now"] = Outcome(
+            value=_full_sync_result(added=13, missing=5, not_loaded=193, new_in_cloud=192)
+        )
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.start_run(dry_run=False)
+        links = screen.links
+        for link in (links.mappings, links.new_chats, links.sessions):
+            self.assertTrue(link.isVisibleTo(window))
+
+        links.new_chats.click()
+        settings = window.screen("settings")
+        self.assertIs(window._stack.currentWidget(), settings)
+        self.assertEqual(settings.model.tab, "sync")
+        self.assertTrue(settings.tabs.currentWidget().isAncestorOf(settings.field_widget("semantic.new_chats")))
+
+        window.go_to("sync")
+        links.mappings.click()
+        self.assertEqual(window.screen("settings").model.tab, "mappings")
+
+        window.go_to("sync")
+        links.sessions.click()
+        sessions = window.screen("sessions")
+        self.assertIs(window._stack.currentWidget(), sessions)
+        self.assertEqual(sessions._pair(), ("machine-a", "laptop"))
+
+    def test_no_button_when_nothing_was_left_behind(self) -> None:
+        window, controller = self.make()
+        controller.outcomes["handoff_now"] = Outcome(value=_full_sync_result(added=2))
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.start_run(dry_run=False)
+        for link in (screen.links.mappings, screen.links.new_chats, screen.links.sessions):
+            self.assertFalse(link.isVisibleTo(window))
+
     def test_a_real_sync_asks_first_and_does_nothing_when_declined(self) -> None:
         window, controller = self.make(confirm=False)
         screen = window.screen("sync")
@@ -972,6 +1022,65 @@ class SessionsTests(_WindowTestCase):
         screen = window.screen("sessions")
         screen.scan()
         self.assertIn(window.catalog.plural("sessions.plan.cwd_absent", 2), screen.plan_note.text())
+
+    def _laptop_plan(self) -> TransferPlan:
+        """The laptop of 2026-10-02 in miniature: moves, new chats, a duplicate."""
+        plan = _transfer_plan(conflict=False)
+        extra = (
+            TransferItem("m" * 64, BranchRelation.ARCHIVE_TRANSITION, TransferAction.ARCHIVE_TRANSITION,
+                         "a" * 64, "a" * 64, 3, 3, "archived_sessions/m.jsonl",
+                         codes=("ARCHIVE_FOLLOWS_REMOTE", "MOVES_BRANCH")),
+            TransferItem("n" * 64, BranchRelation.FAST_FORWARD_LOCAL, TransferAction.BLOCKED_UNPROVEN_LAYOUT,
+                         "", "b" * 64, 0, 2, codes=("SESSION_ON_ONE_SIDE_ONLY", "CWD_ABSENT_HERE")),
+            TransferItem("o" * 64, BranchRelation.INVALID, TransferAction.BLOCKED_INVALID_BRANCH,
+                         "c" * 64, "d" * 64, 0, 57, codes=("LOCAL_DUPLICATE_SESSION_ID",)),
+        )
+        return TransferPlan(
+            plan.version, "plan-laptop", plan.created_at_utc, plan.source_machine, plan.target_machine,
+            plan.layout_id, plan.canonical_version, plan.volatile, plan.items + extra,
+            ("LOCAL_DUPLICATE_SESSION_ID", "IN_PLACE", "CWD_ABSENT_HERE", "PLAN_HAS_BLOCKED_ITEMS"),
+        )
+
+    def test_the_banner_says_in_words_what_is_left_out_never_raw_codes(self) -> None:
+        # CS-346/347: "Unresolved: LOCAL_DUPLICATE_SESSION_ID, IN_PLACE, ..." told
+        # a person nothing, and half of those codes refuse nothing.
+        controller = FakeController()
+        controller.outcomes["scan_sessions"] = Outcome(value=SessionScan(self._laptop_plan(), Path("C:/p/s.json"), Path("C:/p/r.json"), False))
+        window, _ = self.make(controller=controller)
+        screen = window.screen("sessions")
+        screen.scan()
+        self.assertEqual(screen.banner.title.text(), window.catalog.text("sessions.partial.title"))
+        detail = screen.banner.detail.text()
+        for key in ("moves", "new_in_cloud", "unreadable"):
+            self.assertIn(window.catalog.plural(f"sessions.note.{key}", 1), detail)
+        for code in ("IN_PLACE", "CWD_ABSENT_HERE", "PLAN_HAS_BLOCKED_ITEMS", "LOCAL_DUPLICATE_SESSION_ID"):
+            self.assertNotIn(code, detail + screen.banner.title.text())
+        self.assertFalse(screen.settings_button.isHidden(), "the one thing a person can change")
+        from codexsync.gui.window import PAGES
+
+        screen.settings_button.click()
+        self.assertEqual(window._nav.currentRow(), PAGES.index("settings"))
+
+    def test_the_source_machine_is_the_one_the_full_sync_pairs_with(self) -> None:
+        # CS-345: opened by hand the page had no other machine selected.
+        controller = FakeController()
+        controller.config_info = lambda: Outcome(value=ConfigInfo(
+            "laptop", ("aaa-first", "desktop", "laptop"), None, None,
+            Path("C:/m"), Path("C:/b"), Path("C:/t"), Path("C:/p"), usual_source="desktop",
+        ))
+        window, _ = self.make(controller=controller)
+        window.go_to("sessions")
+        self.assertEqual(window.screen("sessions").source.currentText(), "desktop")
+
+    def test_what_needs_a_decision_here_is_what_stops_a_full_sync(self) -> None:
+        # CS-349: the sync said "decide on the Sessions page" about 11 archive
+        # moves the page counted as 0 decisions.
+        from codexsync.app import _UNRESOLVED_TRANSFER_BLOCKS
+        from codexsync.gui.screens.sessions import CATEGORIES
+
+        decide = {action for action, category in CATEGORIES.items() if category == "decide"}
+        self.assertEqual(decide, {action.value for action in _UNRESOLVED_TRANSFER_BLOCKS})
+        self.assertEqual(CATEGORIES["ARCHIVE_TRANSITION"], "transfer")
 
     def _rewritten_plan(self) -> TransferPlan:
         plan = _transfer_plan(conflict=False)
@@ -2426,7 +2535,10 @@ class HandoffCardTests(_WindowTestCase):
         self.assertIn(("handoff_now",), controller.calls)
         text = screen.handoff_status.text()
         self.assertIn(window.catalog.text("automation.handoff.done.loaded", machine="desktop"), text)
-        self.assertIn(window.catalog.plural("automation.handoff.done.left", 3), text)
+        # The same notes, and the same buttons, as the Sync page's full sync.
+        self.assertIn(window.catalog.plural("sync.note.chats_not_loaded", 3), text)
+        self.assertTrue(screen.handoff_links.sessions.isVisibleTo(window))
+        self.assertFalse(screen.handoff_links.new_chats.isVisibleTo(window))
 
     def test_declining_writes_nothing(self) -> None:
         controller = FakeController()
@@ -2889,22 +3001,59 @@ class SyncHistoryTests(_WindowTestCase):
         catalog = load("en")
         table = screen.history_table
         self.assertEqual(table.rowCount(), 3)
-        self.assertEqual(table.item(0, 1).text(), catalog.text("sync.history.result.COMMITTED"))
-        self.assertEqual(table.item(0, 2).text(), catalog.text("sync.history.origin.window"))
-        self.assertIn(catalog.plural("sync.count.to_cloud", 2), table.item(0, 3).text())
-        self.assertEqual(table.item(0, 4).text(), "snap-new")
+        self.assertEqual(table.item(0, 1).text(), catalog.text("sync.history.family.sync"))
+        self.assertEqual(table.item(0, 2).text(), catalog.text("sync.history.result.COMMITTED"))
+        self.assertEqual(table.item(0, 3).text(), catalog.text("sync.history.origin.window"))
+        self.assertIn(catalog.plural("sync.count.to_cloud", 2), table.item(0, 4).text())
+        self.assertEqual(table.item(0, 5).text(), "snap-new")
         self.assertEqual(
-            table.item(1, 1).text(),
+            table.item(1, 2).text(),
             catalog.text(
                 "sync.history.result.with_reason",
                 result=catalog.text("sync.history.result.FAILED"),
                 reason=catalog.text("sync.history.failure.ConflictError"),
             ),
         )
-        self.assertEqual(table.item(1, 2).text(), catalog.text("sync.history.origin.unattended"))
+        self.assertEqual(table.item(1, 3).text(), catalog.text("sync.history.origin.unattended"))
         # A journal from before the counts existed says only its total.
-        self.assertEqual(table.item(2, 2).text(), "—")
-        self.assertEqual(table.item(2, 3).text(), catalog.plural("sync.count.files", 159))
+        self.assertEqual(table.item(2, 3).text(), "—")
+        self.assertEqual(table.item(2, 4).text(), catalog.plural("sync.count.files", 159))
+
+    def test_a_full_sync_is_three_rows_and_says_what_each_carried(self) -> None:
+        # 2026-10-03: a sync that carried 26 chats and 13 projects showed as one
+        # row reading "0 to cloud, 0 to local" -- the settings journal alone.
+        catalog = load("en")
+        window, controller = self.make()
+        controller.outcomes["sync_history"] = Outcome(value=[
+            JournalInfo(
+                "op-p", "project-sync", "COMMITTED", "2026-10-03T04:33:29Z", 19, "s3", True, True, False, False, True,
+                counts={"projects_added": 13, "changes": 19}, origin="window",
+            ),
+            JournalInfo(
+                "op-c", "sessions", "COMMITTED", "2026-10-03T04:32:56Z", 26, "s2", True, True, False, False, True,
+                counts={"to_cloud": 0, "to_local": 26, "deletions": 0}, origin="window",
+            ),
+            JournalInfo(
+                "op-s", "sync", "COMMITTED", "2026-10-03T04:32:26Z", 0, "s1", True, True, False, False, True,
+                counts={"to_cloud": 0, "to_local": 0, "deletions": 0}, origin="window",
+            ),
+            # Written before chats recorded their counts: the total, as chats.
+            JournalInfo("op-c0", "sessions", "COMMITTED", "2026-10-01T05:04:06Z", 9, "s0", True, True, False, False, True),
+        ])
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.show_history()
+        self.pump(lambda: screen.model.history is not None)
+        table = screen.history_table
+        self.assertEqual(
+            [table.item(row, 1).text() for row in range(4)],
+            [catalog.text("sync.history.family.project-sync"), catalog.text("sync.history.family.sessions"),
+             catalog.text("sync.history.family.sync"), catalog.text("sync.history.family.sessions")],
+        )
+        self.assertIn(catalog.plural("sync.count.projects_added", 13), table.item(0, 4).text())
+        self.assertIn(catalog.plural("sync.count.to_local", 26), table.item(1, 4).text())
+        self.assertEqual(table.item(2, 4).text(), catalog.text("sync.history.no_changes"))
+        self.assertEqual(table.item(3, 4).text(), catalog.plural("sync.count.chats", 9))
 
     def test_an_unknown_failure_is_named_by_its_class(self) -> None:
         from dataclasses import replace
@@ -2915,7 +3064,7 @@ class SyncHistoryTests(_WindowTestCase):
         screen = window.screen("sync")
         screen.show_history()
         self.pump(lambda: screen.model.history is not None)
-        self.assertIn("WeirdError", screen.history_table.item(0, 1).text())
+        self.assertIn("WeirdError", screen.history_table.item(0, 2).text())
 
     def test_no_runs_says_so(self) -> None:
         window, controller = self.make()

@@ -107,7 +107,7 @@ class BackupsScreen(Screen):
         self.copies_refresh = button(self.t("action.refresh"))
         self.copies_refresh.clicked.connect(self.refresh_copies)
         self.copies_configure = button(self.t("backups.copies.configure"))
-        self.copies_configure.clicked.connect(lambda: self.host.go_to("automation"))
+        self.copies_configure.clicked.connect(lambda: self.host.go_to("automation", "state_backup.root_dir"))
         copies_inner.addLayout(row(self.copy_now, self.copies_refresh, self.copies_configure))
         self.copy_status = label("", wrap=True)
         copies_inner.addWidget(self.copy_status)

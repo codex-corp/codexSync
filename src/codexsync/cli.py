@@ -863,8 +863,11 @@ def build_parser() -> argparse.ArgumentParser:
         "history", help="List past mutating runs (sync, sessions, ...) from their journals; writes nothing"
     )
     history.add_argument(
-        "--family", default="sync",
-        help="Operation family to list (sync, sessions, chats, restore, repair, ...) or 'all' (default: sync)",
+        "--family", default="all",
+        help=(
+            "Operation family to list (sync, sessions, project-sync, chats, restore, repair, ...) or "
+            "'all' (default: all -- a full sync writes one run each for settings, chats and projects)"
+        ),
     )
     history.add_argument("--limit", type=int, default=20, help="Newest runs to show (default: 20; 0 = all)")
     history.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
@@ -1632,13 +1635,14 @@ def main(argv: list[str] | None = None) -> int:
                 confirm_plan=args.confirm_plan,
                 resolutions_path=Path(args.resolutions).expanduser().resolve() if args.resolutions else None,
                 dry_run=args.dry_run,
+                origin="cli",
             )
             label = "Session transfer dry-run finished" if args.dry_run else "Session transfer finished"
             print(f"{label}. branches={written}")
             return int(ExitCode.OK)
 
         if args.command == "projects":
-            result = sync_projects(config_path, confirm_plan=args.confirm_plan, dry_run=args.dry_run)
+            result = sync_projects(config_path, confirm_plan=args.confirm_plan, dry_run=args.dry_run, origin="cli")
             if args.as_json:
                 print(json.dumps(_project_sync_json(result), sort_keys=True, indent=2, ensure_ascii=False))
             else:
@@ -1759,11 +1763,16 @@ def main(argv: list[str] | None = None) -> int:
                         f"  chats new to this machine written into Codex: {result.new_chats_written} "
                         "(start Codex, then `doctor` says whether it lists them: session_visibility)"
                     )
-                if result.chats_not_loaded:
+                if result.new_chats_kept_in_cloud:
                     print(
-                        f"  chats left in the cloud copy only: {result.chats_not_loaded} "
-                        "(`sessions scan` lists them; chats new to this machine are copied into Codex "
-                        'only with [semantic] new_chats = "same_path")'
+                        f"  chats new to this machine kept in the cloud copy: {result.new_chats_kept_in_cloud} "
+                        '(set [semantic] new_chats = "same_path" to copy them into Codex)'
+                    )
+                others = result.chats_not_loaded - result.new_chats_kept_in_cloud
+                if others > 0:
+                    print(
+                        f"  other chats left in the cloud copy only: {others} "
+                        "(`sessions scan` says why for each)"
                     )
                 print(
                     f"  projects added: {result.projects_added}, project list changes: {result.project_changes}"

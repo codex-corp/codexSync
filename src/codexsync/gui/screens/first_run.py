@@ -132,6 +132,9 @@ class FirstRunScreen(Screen):
 
         after, after_inner = card(self.t("first_run.after.title"))
         after_inner.addWidget(label(self.t("first_run.after.body"), wrap=True))
+        self.open_overview = button(self.t("first_run.after.open"))
+        self.open_overview.clicked.connect(lambda: self.host.go_to("overview"))
+        after_inner.addLayout(row(self.open_overview))
         self.body.addWidget(after)
 
     def _remember(self, key: str) -> None:

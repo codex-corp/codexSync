@@ -83,7 +83,7 @@ class HomeScreen(Screen):
         go = {
             "sync": self._open_history,
             "state": lambda: self.host.go_to("chats"),
-            "copies": lambda: self.host.go_to("automation"),
+            "copies": lambda: self.host.go_to("automation", "state_backup.root_dir"),
             "backups": lambda: self.host.go_to("backups"),
             "guardian": lambda: self.host.go_to("guardian"),
             "automation": lambda: self.host.go_to("automation"),
@@ -184,6 +184,7 @@ class HomeScreen(Screen):
         lines = [
             self.join([self.p("home.sync.runs", sync.runs), self.p("home.sync.failed", sync.failed)]),
             self.t("home.sync.files", to_cloud=sync.to_cloud, to_local=sync.to_local),
+            self.t("home.sync.chats", to_cloud=sync.chats_to_cloud, to_local=sync.chats_to_local),
         ]
         return text, lines, tone
 

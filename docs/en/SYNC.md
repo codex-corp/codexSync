@@ -212,9 +212,9 @@ cloud copy since.
 
 **Chats.** A chat both machines have — one you continued on the other machine —
 is loaded into `.codex` over its own file, at the path Codex's own catalogue
-names for it. A chat started on the other machine is loaded only with `[semantic] new_chats =
-"same_path"`, at the path it has there; by default it stays in the cloud copy
-(see [Sessions](SESSIONS.md#writing-into-codex)). A handoff says how many new
+names for it. A chat started on the other machine is loaded too, at the path it
+has there (`[semantic] new_chats = "same_path"`, the default); with
+`keep_in_cloud` it stays in the cloud copy (see [Sessions](SESSIONS.md#writing-into-codex)). A handoff says how many new
 chats it wrote into Codex — `doctor` then says whether Codex lists them — and
 how many stayed in the cloud copy only, rather than calling the work loaded.
 
@@ -230,16 +230,19 @@ Every real sync leaves an operation journal, and the history is those journals
 read newest first — there is no separate log to keep:
 
 ```powershell
-codexsync -c config.toml history                 # the last 20 syncs
-codexsync -c config.toml history --family all    # every kind of write: sync, sessions, chats, restore…
+codexsync -c config.toml history                  # the last 20 runs of every kind
+codexsync -c config.toml history --family sync    # one kind only: sync, sessions, project-sync, chats, restore…
 codexsync -c config.toml history --json --limit 0
 ```
 
-Each run shows when it started, its result (and, for a failure, the kind of
-error — never its message, which may name files), who started it (`window`,
-`cli`, `unattended` for the task at sign-in, or `handoff` for the handoff watcher), how many files went to the
-cloud, to the local side and were deleted, and the backup it made. A journal
-written before 0.2 recorded these fields shows only its total.
+One full sync is three runs, one per part: `sync` (settings files), `sessions`
+(chats) and `project-sync` (projects). Each run shows when it started, its
+result (and, for a failure, the kind of error — never its message, which may
+name files), who started it (`window`, `cli`, `unattended` for the task at
+sign-in, or `handoff` for the handoff watcher), what it carried — files or
+chats to the cloud, to the local side and deleted, or projects added — and the
+backup it made. A journal written before these fields were recorded shows only
+its total.
 
 Not listed: a dry run, which writes nothing, and a run that stopped before its
 first write — Codex open, or a conflict under `manual_abort`. The window shows

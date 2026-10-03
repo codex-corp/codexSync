@@ -245,7 +245,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         mirror_compression = parse_codec(str(semantic_raw.get("mirror_compression", "xz")))
     except ValueError as exc:
         raise ConfigError(f"semantic.mirror_compression: {exc}") from exc
-    new_chats = str(semantic_raw.get("new_chats", "keep_in_cloud")).strip().lower()
+    new_chats = str(semantic_raw.get("new_chats", "same_path")).strip().lower()
     if new_chats not in NEW_CHATS_VALUES:
         raise ConfigError(
             f"semantic.new_chats must be one of {', '.join(NEW_CHATS_VALUES)}, got {new_chats!r}"

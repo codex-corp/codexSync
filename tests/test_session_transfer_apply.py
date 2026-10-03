@@ -191,6 +191,20 @@ class SessionTransferApplyTests(unittest.TestCase):
         journals = JournalStore(self.root / ".tmp")
         self.assertEqual(journals.non_terminal(), [], "a finished transfer blocks nothing")
 
+    def test_the_journal_says_how_many_chats_went_each_way(self) -> None:
+        # The window's history read "0 to the cloud, 0 to local" after a sync
+        # that carried 26 chats: only the settings journal had numbers.
+        self._branch(self.local_dir, "s1", ["one"])
+        self._branch(self.cloud_dir, "s1", ["one", "two"])
+        self._apply(self._plan(), origin="window")
+        (journal,) = [
+            JournalStore(self.root / ".tmp").load(path.stem)
+            for path in (self.root / ".tmp" / "journals").glob("*.json")
+        ]
+        self.assertEqual(journal.family, "sessions")
+        self.assertEqual(dict(journal.counts), {"to_cloud": 0, "to_local": 1, "deletions": 0})
+        self.assertEqual(journal.origin, "window")
+
     # --- refusals ---------------------------------------------------------
 
     def test_a_divergence_blocks_the_apply_and_keeps_both_branches(self) -> None:

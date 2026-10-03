@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .config import PATH_SUBSTITUTIONS, load_config, preview_path
 from .progress import PHASES, ProgressCallback, report as report_progress
@@ -63,6 +63,7 @@ from .models import (
     MIN_SCHEDULER_INTERVAL_SECONDS,
     AppConfig,
     CopyAction,
+    DeleteAction,
     FileMeta,
     SyncPlan,
 )
@@ -158,6 +159,7 @@ from .semantic_transfer import (
     TransferAction,
     TransferPlan,
     FORMAT_MIGRATION,
+    MOVES_BRANCH,
     OLDER_FORMAT_HAS_LATER_RECORDS,
     NEW_CHAT_SAME_PATH,
     build_transfer_plan,
@@ -168,12 +170,14 @@ from .semantic_transfer import (
     local_folder_exists,
     mirror_codec_for,
     plan_scope,
+    prefer_catalogued_copies,
     save_transfer_plan,
+    transfer_direction,
 )
 from .semantic_store import SemanticStore
 from .jsonl_codec import JSONL_READ_ERRORS, JsonlCodec, codec_of, open_jsonl
 from .sqlite_audit import read_thread_placements
-from .session_catalog import scan_sessions
+from .session_catalog import scan_both_sides, scan_sessions
 from .session_index import (
     PROVEN_CONTRACTS,
     SESSION_INDEX_FILE,
@@ -618,6 +622,8 @@ def commit_global_state(
     source: Path,
     original: bytes,
     candidate: bytes,
+    counts: Mapping[str, int] | None = None,
+    origin: str | None = None,
 ) -> int:
     """Replace `.codex-global-state.json` with `candidate`, or leave it alone.
 
@@ -639,7 +645,8 @@ def commit_global_state(
             cfg.paths.backup_dir, machine, compression="none", journal_root=cfg.paths.temp_dir
         )
         journal = journals.begin(
-            family, plan_id, action_count, backup_snapshot=manager.snapshot_name
+            family, plan_id, action_count, backup_snapshot=manager.snapshot_name,
+            counts=counts, origin=origin,
         )
         original_sha256 = hashlib.sha256(original).hexdigest()
         # Everything up to COMMITTING replaces nothing, so any failure here --
@@ -958,6 +965,7 @@ def sync_projects(
     confirm_plan: str | None = None,
     dry_run: bool = False,
     gate: SafetyGate | None = None,
+    origin: str | None = None,
 ) -> ProjectSyncResult:
     """Preview or carry other machines' project lists into this one (CS-333).
 
@@ -1028,6 +1036,9 @@ def sync_projects(
             cfg, gate, OperationKind.PROJECT_SYNC,
             family="project-sync", plan_id=plan.plan_id, action_count=plan.action_count,
             state_root=local_dir, source=source, original=original, candidate=candidate,
+            # What the history shows for this run: numbers only, no names.
+            counts={"projects_added": len(plan.added), "changes": plan.action_count},
+            origin=origin,
         )
         LOG.info(
             "projects: %d added, pins %s, order %s, %d chat binding(s) written",
@@ -1116,24 +1127,20 @@ def scan_session_transfer(
     decision = _make_safety_gate(cfg).check(OperationKind.SESSION_SCAN)
     volatile = decision.process_state is not ProcessState.STOPPED
 
-    local_catalog = scan_sessions(
-        local_dir, volatile=volatile, source_machine=source_machine,
-        max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
-        progress=progress,
-    )
-    remote_catalog = scan_sessions(
-        cloud_dir, volatile=volatile, source_machine=target_machine,
-        max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
-        progress=progress, phase="sessions_cloud",
+    local_catalog, remote_catalog = scan_both_sides(
+        local_dir, cloud_dir, local_machine=source_machine, remote_machine=target_machine,
+        max_line_bytes=cfg.semantic.max_jsonl_line_bytes, volatile=volatile, progress=progress,
     )
     resolutions = load_branch_resolutions(resolutions_path) if resolutions_path else {}
+    placements = read_thread_placements(local_dir)
     return build_transfer_plan(
-        local_catalog, remote_catalog,
+        prefer_catalogued_copies(local_catalog, placements), remote_catalog,
         local_root=local_dir, remote_root=cloud_dir,
         source_machine=source_machine, target_machine=target_machine,
         resolutions=resolutions,
         confirmed_bases=_recorded_bases(cfg),
-        placements=read_thread_placements(local_dir),
+        agreed_states=_agreed_states(cfg),
+        placements=placements,
         layout_id=layout_for_new_chats(cfg.semantic.new_chats),
         mirror_codec=cfg.semantic.mirror_compression,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
@@ -1229,6 +1236,19 @@ def _recorded_bases(cfg: AppConfig) -> set[str]:
     except (OSError, ValueError):
         LOG.debug("no semantic bases are readable; ancestry decisions stay unproven")
         return set()
+
+
+def _agreed_states(cfg: AppConfig) -> dict[str, str]:
+    """The archive state this machine last agreed on, per session, or nothing.
+
+    It tells which side of an archive move moved. Unreadable means this machine
+    follows the mirror, whose state another machine vouched for (D-023).
+    """
+    try:
+        return SemanticStore(cfg.semantic.root_dir, require_guardian_identity(cfg)).own_states()
+    except (OSError, ValueError):
+        LOG.debug("no semantic manifest of this machine is readable; archive moves follow the mirror")
+        return {}
 
 
 def load_branch_resolutions(path: Path) -> dict[str, BranchResolution]:
@@ -1340,6 +1360,7 @@ def apply_session_transfer(
     confirm_plan: str,
     resolutions_path: Path | None = None,
     dry_run: bool = False,
+    origin: str | None = None,
 ) -> int:
     """Apply one exact session transfer plan with Codex closed.
 
@@ -1400,17 +1421,6 @@ def apply_session_transfer(
             plan.plan_id, len(deferred),
             ", ".join(sorted({item.action.value for item in deferred})),
         )
-    archive_moves = [item for item in plan.items if item.action is TransferAction.ARCHIVE_TRANSITION]
-    if archive_moves:
-        # Moving a branch between sessions/ and archived_sessions/ means deleting
-        # the old copy, and leaving it would activate two branches of one session
-        # at once. delete_policy is never, so this stays out of 0.2 rather than
-        # being approximated.
-        raise ConflictError(
-            f"{len(archive_moves)} archive transition(s) require moving a branch, which needs a "
-            "delete; delete_policy=never. Move these by hand after taking a backup."
-        )
-
     copies = _transfer_copy_actions(
         plan, local_dir, cloud_dir, local_by_hash, remote_by_hash
     )
@@ -1448,8 +1458,11 @@ def apply_session_transfer(
     machine = cfg.identity.machine_id or platform.node()
     with OperationLock(cfg.paths.temp_dir, state_root=local_dir, machine_id=machine, family="sessions"):
         journals = JournalStore(cfg.paths.temp_dir)
+        # The same numbers a settings sync records, so a history row can say
+        # how many chats went each way (`to_cloud` is the mirror).
         journal = journals.begin(
-            "sessions", plan.plan_id, copies.action_count, backup_snapshot=mgr.snapshot_name
+            "sessions", plan.plan_id, copies.action_count, backup_snapshot=mgr.snapshot_name,
+            counts=sync_plan_counts(copies), origin=origin,
         )
         current = [journal]
 
@@ -1496,21 +1509,20 @@ def _rebuild_transfer_plan(
     plan: TransferPlan,
     resolutions_path: Path | None,
 ) -> tuple[TransferPlan, dict[str, object], dict[str, object]]:
-    local_catalog = scan_sessions(
-        local_dir, volatile=False, source_machine=plan.source_machine,
+    local_catalog, remote_catalog = scan_both_sides(
+        local_dir, cloud_dir, local_machine=plan.source_machine, remote_machine=plan.target_machine,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
     )
-    remote_catalog = scan_sessions(
-        cloud_dir, volatile=False, source_machine=plan.target_machine,
-        max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
-    )
+    placements = read_thread_placements(local_dir)
+    local_catalog = prefer_catalogued_copies(local_catalog, placements)
     fresh = build_transfer_plan(
         local_catalog, remote_catalog,
         local_root=local_dir, remote_root=cloud_dir,
         source_machine=plan.source_machine, target_machine=plan.target_machine,
         resolutions=load_branch_resolutions(resolutions_path) if resolutions_path else {},
         confirmed_bases=_recorded_bases(cfg),
-        placements=read_thread_placements(local_dir),
+        agreed_states=_agreed_states(cfg),
+        placements=placements,
         layout_id=plan.layout_id,
         # The codec the plan was frozen under, not whatever the config says
         # now. The plan is the contract the user confirmed by its id; a config
@@ -1554,15 +1566,23 @@ def _transfer_copy_actions(
     The container comes from the destination the item names, not from the
     plan-wide mirror layout: a branch the mirror already stores keeps the
     container it is stored in, so within one plan the two can differ.
+
+    A move (`MOVES_BRANCH`, D-023) is a copy to the new path plus the removal of
+    the destination side's old file. The engine backs that file up and verifies
+    the backup before replacing or removing anything, and removes it only after
+    every copy is in place.
     """
     to_local: list[CopyAction] = []
     to_cloud: list[CopyAction] = []
+    deletions: list[DeleteAction] = []
     for item in plan.items:
-        if not item.action.writes or item.action is TransferAction.ARCHIVE_TRANSITION:
+        direction = transfer_direction(item)
+        if direction is None:
             continue
         if not item.target_relative_path:
             raise FailSafeError("A writable plan item has no destination path")
-        if item.action is TransferAction.FAST_FORWARD_LOCAL:
+        towards_local = direction == "local"
+        if towards_local:
             source = remote_by_hash.get(item.session_hash)
             root, bucket = local_dir, to_local
             # A destination the Codex runtime reads is never transformed.
@@ -1575,7 +1595,7 @@ def _transfer_copy_actions(
             raise FailSafeError("A planned branch is no longer present on its source side")
         destination = root / Path(*item.target_relative_path.split("/"))
         _require_within(destination, root, "session transfer destination")
-        source_root = cloud_dir if item.action is TransferAction.FAST_FORWARD_LOCAL else local_dir
+        source_root = cloud_dir if towards_local else local_dir
         bucket.append(
             CopyAction(
                 src=source_root / Path(*source.relative_path.split("/")),
@@ -1584,7 +1604,19 @@ def _transfer_copy_actions(
                 codec=codec,
             )
         )
-    return SyncPlan(to_local=to_local, to_cloud=to_cloud)
+        if MOVES_BRANCH in item.codes:
+            old = (local_by_hash if towards_local else remote_by_hash).get(item.session_hash)
+            if old is None:
+                raise FailSafeError("A planned move no longer finds the file it moves")
+            if old.relative_path == item.target_relative_path:
+                raise FailSafeError("A planned move names the file it moves as its destination")
+            old_path = root / Path(*old.relative_path.split("/"))
+            _require_within(old_path, root, "session transfer move source")
+            deletions.append(DeleteAction(
+                path=old_path, relative_path=old.relative_path,
+                side="local" if towards_local else "cloud",
+            ))
+    return SyncPlan(to_local=to_local, to_cloud=to_cloud, deletions=deletions)
 
 
 def _bundle_resolved_conflicts(
@@ -1656,8 +1688,7 @@ def _record_semantic_manifest(
     """
     agreed = [
         item for item in plan.items
-        if item.action is TransferAction.NOOP
-        or (item.action.writes and item.action is not TransferAction.ARCHIVE_TRANSITION)
+        if item.action is TransferAction.NOOP or transfer_direction(item) is not None
     ]
     if not agreed:
         return 0
@@ -1668,7 +1699,7 @@ def _record_semantic_manifest(
         return 0
     recorded = 0
     for item in agreed:
-        towards_local = item.action is TransferAction.FAST_FORWARD_LOCAL
+        towards_local = transfer_direction(item) == "local"
         # The side that was copied *from* is the one whose bytes both sides now
         # hold, so it is the one that describes the agreed branch.
         source = (remote_by_hash if towards_local else local_by_hash).get(item.session_hash)
@@ -1698,10 +1729,12 @@ def _verify_transferred_branches(
 ) -> None:
     """Re-read what was written and confirm it is the branch that was planned."""
     for item in plan.items:
-        if not item.action.writes or item.action is TransferAction.ARCHIVE_TRANSITION:
+        direction = transfer_direction(item)
+        if direction is None:
             continue
-        root = local_dir if item.action is TransferAction.FAST_FORWARD_LOCAL else cloud_dir
-        expected = item.remote_sha256 if item.action is TransferAction.FAST_FORWARD_LOCAL else item.local_sha256
+        towards_local = direction == "local"
+        root = local_dir if towards_local else cloud_dir
+        expected = item.remote_sha256 if towards_local else item.local_sha256
         written = root / Path(*(item.target_relative_path or "").split("/"))
         digest = hashlib.sha256()
         records = 0
@@ -1716,9 +1749,7 @@ def _verify_transferred_branches(
             raise FailSafeError(
                 f"Transferred branch could not be read back after writing: {exc}"
             ) from exc
-        planned_records = (
-            item.remote_records if item.action is TransferAction.FAST_FORWARD_LOCAL else item.local_records
-        )
+        planned_records = item.remote_records if towards_local else item.local_records
         if digest.hexdigest() != expected or records != planned_records:
             raise FailSafeError(
                 "Transferred branch does not match the plan after writing; recovery is required"
@@ -1916,6 +1947,10 @@ class HandoffResult:
     #: there: no proven layout, or a thread the catalogue does not place.
     #: Reported, because "loaded" must not be said of work that stayed behind.
     chats_not_loaded: int = 0
+    #: Of those, chats this machine never held that stayed in the cloud copy
+    #: only because `[semantic] new_chats` is `keep_in_cloud` -- the one part
+    #: of `chats_not_loaded` a setting changes (CS-347).
+    new_chats_kept_in_cloud: int = 0
     #: Chats this machine never held that were written into `.codex` because
     #: `[semantic] new_chats = "same_path"` (D-020). Codex shows them only once
     #: it takes the files up, which `doctor` reports as `session_visibility`.
@@ -1926,6 +1961,9 @@ class HandoffResult:
     project_changes: int = 0
     #: Added projects whose folder does not exist on this machine.
     projects_missing_folders: int = 0
+    #: The other machine the chats were paired with, so a page can open
+    #: Sessions for exactly this pair.
+    source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2032,6 +2070,56 @@ def _handoff_source(board: Board, machine: str, pending: Sequence[HandoffRecord]
     return others[-1].machine if others else machine
 
 
+@dataclass(frozen=True, slots=True)
+class KnownMachines:
+    """Machine names a person may pick, and the one a full sync would pair with."""
+
+    #: This machine, both ends of every `[[path_mappings]]` rule, and every
+    #: machine that left a trace in the shared workspace: a handoff record, a
+    #: project publication or a semantic manifest directory.
+    names: tuple[str, ...]
+    #: The other machine of the chat transfer's pair, as `run_handoff` picks
+    #: it; ``None`` before any other machine has handed off (CS-345).
+    usual_source: str | None = None
+
+
+def known_machines(config_path: Path) -> KnownMachines:
+    """Every machine name this config or the shared workspace knows. Reads only.
+
+    A config without `[[path_mappings]]` names only this machine, which left
+    the Sessions page with no other machine to compare with unless it was
+    opened from a stopped sync (CS-345). The traces in the workspace are what
+    the full sync itself uses, so both name the same pair. A trace that cannot
+    be read is skipped: this is a list of choices, never a decision.
+    """
+    cfg = load_config(config_path)
+    own = cfg.identity.machine_id
+    names: set[str] = {own} if own else set()
+    for rule in cfg.path_mappings:
+        names.update((rule.source_machine, rule.target_machine))
+    usual: str | None = None
+    try:
+        machine = _handoff_machine(cfg)
+        board = read_board(_handoff_root(cfg))
+        names.update(board.records)
+        source = _handoff_source(board, machine, board.pending(machine))
+        usual = source if source != machine else None
+    except (ConfigError, OSError):
+        LOG.debug("no handoff board is readable; machines come from the config only")
+    traces: list[Path] = []
+    try:
+        traces.extend(path for path in projects_root(cfg).glob("*.json") if path.is_file())
+    except (ConfigError, OSError):
+        pass
+    try:
+        manifest = cfg.semantic.root_dir / "manifest"
+        traces.extend(path for path in manifest.iterdir() if path.is_dir())
+    except OSError:
+        pass
+    names.update(path.stem for path in traces if not path.name.startswith("."))
+    return KnownMachines(tuple(sorted(name for name in names if name)), usual)
+
+
 def session_pair_name(source_machine: str, target_machine: str) -> str:
     """How files kept per pair of machines are named (plans, recorded decisions).
 
@@ -2111,9 +2199,11 @@ def run_handoff(
     )
     if plan.volatile:
         raise SafetyPreconditionError("Codex started while the chats were being read; nothing was written")
+    # Exactly what the Sessions page lists under "needs a decision", and what
+    # the apply below would refuse: an archive move is applied (D-023), so it
+    # stops nothing (CS-349).
     unresolved = [item for item in plan.blocked_items if item.action in _UNRESOLVED_TRANSFER_BLOCKS]
-    archive_moves = [item for item in plan.items if item.action is TransferAction.ARCHIVE_TRANSITION]
-    if unresolved or archive_moves:
+    if unresolved:
         rewrites = [
             item for item in unresolved
             if item.action is TransferAction.BLOCKED_CONFLICT and FORMAT_MIGRATION in item.codes
@@ -2128,7 +2218,6 @@ def run_handoff(
                 if item.action is TransferAction.BLOCKED_CONFLICT and FORMAT_MIGRATION not in item.codes
             ),
             collisions=sum(1 for item in unresolved if item.action is TransferAction.BLOCKED_TARGET_COLLISION),
-            archive_moves=len(archive_moves),
         )
     plan_path = plans / f"handoff-sessions-plan-{pair}.json"
     save_transfer_plan(plan, plan_path)
@@ -2139,6 +2228,7 @@ def run_handoff(
     report_progress(progress, "sync_chats", 0, 0)
     session_actions = apply_session_transfer(
         config_path, plan_path=plan_path, confirm_plan=plan.plan_id, resolutions_path=resolutions_path,
+        origin=origin,
     )
     # Projects last: a chat binding may name a chat the transfer just wrote.
     # A merge never needs a person (an ambiguous project is left alone), so it
@@ -2146,12 +2236,12 @@ def run_handoff(
     report_progress(progress, "sync_projects", 0, 0)
     try:
         project_preview = sync_projects(config_path)
-        projects = sync_projects(config_path, confirm_plan=project_preview.plan.plan_id)
+        projects = sync_projects(config_path, confirm_plan=project_preview.plan.plan_id, origin=origin)
     except ProjectsNotCarried as exc:
         LOG.warning("projects were not carried: %s", exc)
         projects = None
     to_cloud = len(ctx.plan.to_cloud) + sum(
-        1 for item in plan.items if item.action is TransferAction.FAST_FORWARD_REMOTE
+        1 for item in plan.items if transfer_direction(item) == "mirror"
     )
     # A run that wrote nothing to the cloud hands nothing off: a new id would
     # make every other machine wait for a "delivery" of what it already has.
@@ -2172,10 +2262,15 @@ def run_handoff(
     )
     return HandoffResult(
         machine=machine,
+        source=source,
         projects_added=len(projects.plan.added) if projects else 0,
         project_changes=projects.written if projects else 0,
         projects_missing_folders=len(projects.plan.missing_folders) if projects else 0,
         chats_not_loaded=left_behind,
+        new_chats_kept_in_cloud=sum(
+            1 for item in plan.items if item.action is TransferAction.BLOCKED_UNPROVEN_LAYOUT
+            and "SESSION_ON_ONE_SIDE_ONLY" in item.codes
+        ),
         new_chats_written=new_chats,
         taken=tuple(item.machine for item in pending),
         sync_actions=ctx.plan.action_count,
