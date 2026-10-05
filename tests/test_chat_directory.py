@@ -139,9 +139,10 @@ class ChatDirectoryTests(unittest.TestCase):
     def test_rootpaths_project_with_string_binding_is_readable(self) -> None:
         session_id = "23232323-0000-0000-0000-000000000023"
         self._session(session_id, cwd="D:\\elsewhere")
-        state = self._state(assignments={session_id: "p1"})
+        state = json.loads(self._state(assignments={session_id: "p1"}))
+        state.pop("app-server-project-id-by-legacy-project-id-by-host")
 
-        directory = self._directory(state)
+        directory = self._directory(json.dumps(state).encode("utf-8"))
         chat = directory.chats[0]
 
         self.assertEqual(directory.projects["p1"].roots, (DESKTOP_ROOT,))
