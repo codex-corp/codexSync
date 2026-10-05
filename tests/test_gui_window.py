@@ -2159,6 +2159,7 @@ class ConfigScreensTests(_WindowTestCase):
     def test_creating_without_a_location_asks_for_one(self) -> None:
         window, _ = self.make(controller=Controller(None))
         screen = window.screen("first_run")
+        screen.config_path.setText("")
         screen.create()
         self.assertEqual(screen.status.text(), window.catalog.text("first_run.config.required"))
         self.assertIsNone(window.controller.config_path)
