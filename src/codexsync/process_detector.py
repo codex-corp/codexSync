@@ -35,6 +35,8 @@ import shutil
 import subprocess
 import sys
 
+from .ubuntu_support import current_ubuntu_runtime
+
 
 DETECTOR_CONTRACT_VERSION = 1
 
@@ -124,16 +126,30 @@ class CodexProcessDetector:
                 supported=True,
                 detail="Windows tasklist and CIM process-tree adapter",
             )
-        proof = PROVEN_DETECTORS.get(sys.platform)
+        proof_key = sys.platform
+        platform_name = sys.platform
+        if sys.platform.startswith("linux"):
+            ubuntu = current_ubuntu_runtime()
+            platform_name = ubuntu.detail
+            if not ubuntu.supported or ubuntu.detector_key is None:
+                return ProcessDetectorCapability(
+                    platform="linux",
+                    contract_version=DETECTOR_CONTRACT_VERSION,
+                    supported=False,
+                    detail=ubuntu.detail,
+                )
+            proof_key = ubuntu.detector_key
+
+        proof = PROVEN_DETECTORS.get(proof_key)
         if proof:
             return ProcessDetectorCapability(
-                platform=sys.platform,
+                platform=platform_name,
                 contract_version=DETECTOR_CONTRACT_VERSION,
                 supported=True,
                 detail=f"ps adapter, confirmed against a live Codex: {proof}",
             )
         return ProcessDetectorCapability(
-            platform=sys.platform,
+            platform=platform_name,
             contract_version=DETECTOR_CONTRACT_VERSION,
             supported=False,
             detail=(
