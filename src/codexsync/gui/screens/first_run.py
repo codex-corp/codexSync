@@ -141,6 +141,13 @@ class FirstRunScreen(Screen):
         widget = {"config": self.config_path, "machine": self.machine, "codex": self.codex,
                   "workspace": self.workspace, "mirror": self.mirror}[key]
         self.model.values[key] = widget.currentText() if key == "machine" else widget.text()
+        # A result describes the previous form values. Once any input changes,
+        # keeping that message on screen makes a valid new path look refused.
+        self.model.result = None
+        self.model.result_is_prompt = False
+        if hasattr(self, "status"):
+            self.status.clear()
+            self.status.setVisible(False)
         if key == "config":
             self._render_create_button()
         elif key == "machine":
