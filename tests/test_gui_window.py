@@ -1904,6 +1904,31 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertTrue(outcome.ok, outcome.message)
         return path
 
+    def test_invalid_remembered_codex_config_is_not_adopted_at_startup(self) -> None:
+        from codexsync.config_locations import ConfigChoice
+        from codexsync.gui.window import _startup_controller
+
+        codex_config = self.root / "codex" / "config.toml"
+        codex_config.write_text('[model_providers.openai]\nname = "OpenAI"\n', encoding="utf-8")
+        controller, choice = _startup_controller(
+            ConfigChoice(codex_config, "remembered", True)
+        )
+
+        self.assertIsNone(controller.config_path)
+        self.assertIsNone(choice.path)
+        self.assertEqual(choice.rejected_remembered, codex_config)
+
+    def test_valid_remembered_codexsync_config_is_adopted_at_startup(self) -> None:
+        from codexsync.config_locations import ConfigChoice
+        from codexsync.gui.window import _startup_controller
+
+        path = self._create()
+        controller, choice = _startup_controller(ConfigChoice(path, "remembered", True))
+
+        self.assertEqual(controller.config_path, path)
+        self.assertEqual(choice.path, path)
+        self.assertIsNone(choice.rejected_remembered)
+
     def test_first_run_creates_the_config_and_switches_the_window_to_it(self) -> None:
         missing = self.root / "config.toml"
         window, _ = self.make(controller=Controller(missing))
