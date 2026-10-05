@@ -136,6 +136,18 @@ class ChatDirectoryTests(unittest.TestCase):
         self.assertEqual(chat.association, Association.BOUND)
         self.assertEqual(chat.project_id, "p1")
 
+    def test_rootpaths_project_with_string_binding_is_readable(self) -> None:
+        session_id = "23232323-0000-0000-0000-000000000023"
+        self._session(session_id, cwd="D:\\elsewhere")
+        state = self._state(assignments={session_id: "p1"})
+
+        directory = self._directory(state)
+        chat = directory.chats[0]
+
+        self.assertEqual(directory.projects["p1"].roots, (DESKTOP_ROOT,))
+        self.assertEqual(chat.association, Association.BOUND)
+        self.assertEqual(chat.project_id, "p1")
+
     def test_a_binding_to_a_project_that_is_gone_is_reported_not_hidden(self) -> None:
         self._session("33333333-0000-0000-0000-000000000003")
         state = self._state(assignments={
