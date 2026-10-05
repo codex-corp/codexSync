@@ -778,6 +778,30 @@ def _claim_taskbar_identity() -> None:
         pass
 
 
+def _startup_controller(choice: ConfigChoice) -> tuple[Controller, ConfigChoice]:
+    """Adopt an implicit config only after it proves it belongs to CodexSync.
+
+    Explicit `-c` keeps its historical behavior: the user deliberately named
+    that path, including a missing or invalid file they may want diagnosed.
+    Remembered, current-directory, and executable-adjacent files are only hints.
+    A stale pointer to Codex's own `.codex/config.toml` must never make the
+    whole window run against the wrong configuration.
+    """
+    controller = Controller(choice.path)
+    if choice.path is None or not choice.exists or choice.source == "explicit":
+        return controller, choice
+    outcome = controller.validate_config_candidate()
+    if outcome.ok:
+        return controller, choice
+    rejected = choice.path if choice.source == "remembered" else choice.rejected_remembered
+    return Controller(None), ConfigChoice(
+        path=None,
+        source="none",
+        exists=False,
+        rejected_remembered=rejected,
+    )
+
+
 def launch(config: str | Path | Controller | None = None) -> int:
     """Show the window and run until it closes.
 
@@ -807,7 +831,7 @@ def launch(config: str | Path | Controller | None = None) -> int:
         choice = choose_config_path(
             config, remembered, executable_dir=frozen_executable_dir(),
         )
-        controller = Controller(choice.path)
+        controller, choice = _startup_controller(choice)
     window = MainWindow(controller, settings=settings, choice=choice, remember=write_config_pointer)
     window.show()
     window.place_within_screen()
