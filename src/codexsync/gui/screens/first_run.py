@@ -123,7 +123,7 @@ class FirstRunScreen(Screen):
         self.create_button = button(self.t("first_run.create"), primary=True)
         self.create_button.clicked.connect(self.create)
         self.open_button = button(self.t("first_run.open_existing"))
-        self.open_button.clicked.connect(self.open_existing)
+        self.open_button.clicked.connect(lambda: self.open_existing())
         self.status = label("", wrap=True)
         inner.addWidget(label(self.t("first_run.template"), wrap=True))
         inner.addLayout(row(self.create_button, self.open_button))
