@@ -693,13 +693,26 @@ class OverviewTests(_OverviewCase):
         screen.refresh()
         self.assertIsNone(screen.model.state, "no second job may start")
 
-    def test_the_dry_run_reports_the_plan_and_that_nothing_was_written(self) -> None:
+    def test_the_dry_run_reports_the_read_only_preview_and_never_calls_sync(self) -> None:
         window, controller = self.make()
         screen = window.screen("overview")
         screen.start_dry_run()
-        self.assertIn(("sync", True), controller.calls)
+        self.assertNotIn(("sync", True), controller.calls)
         self.assertIn(window.catalog.text("dry_run.done"), screen.dry_run_result.text())
         self.assertIn(window.catalog.plural("dry_run.plan.actions", 3), screen.dry_run_result.text())
+
+    def test_a_volatile_dry_run_is_shown_as_a_preview_not_a_refusal(self) -> None:
+        controller = FakeController()
+        controller.outcomes["preview_sync"] = Outcome(
+            value=SyncPreview(("a",), (), (), True)
+        )
+        window, _ = self.make(controller=controller)
+        screen = window.screen("overview")
+
+        screen.start_dry_run()
+
+        self.assertIn(window.catalog.text("dry_run.done"), screen.dry_run_result.text())
+        self.assertIn(window.catalog.text("sync.volatile.title"), screen.dry_run_result.text())
 
 
 class OverviewSideTests(_OverviewCase):
