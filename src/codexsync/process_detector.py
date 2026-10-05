@@ -21,8 +21,9 @@ mutation may proceed on the strength of this listing, and a parser nobody has
 run against a live Codex could report "stopped" while it is open -- the one
 mistake this project cannot make. So a platform counts as supported only after
 someone has run `docs/dev/experiments/process-detector-macos.md` on it and recorded
-the result in `PROVEN_DETECTORS`. Until then macOS and Linux answer `UNKNOWN`,
-and `safety.fail_on_unknown` turns that into a refusal.
+the result in `PROVEN_DETECTORS`. Until then macOS and maintained Ubuntu releases answer `UNKNOWN`; other Linux
+hosts are outside the runtime support scope. In every case,
+`safety.fail_on_unknown` turns uncertainty into a refusal.
 """
 from __future__ import annotations
 
@@ -86,8 +87,9 @@ def _run_console_tool(argv: list[str], *, encoding: str) -> subprocess.Completed
         **kwargs,
     )
 
-#: Platforms whose adapter has been run against a live Codex, mapping
-#: ``sys.platform`` to the observation that proved it (OS build and Codex
+#: Runtime targets whose adapter has been run against a live Codex. macOS uses
+#: ``darwin``; Ubuntu uses a release-scoped key such as ``ubuntu:26.04``.
+#: Each value records the observation that proved it (OS build and Codex
 #: version). **Filled only from `docs/dev/experiments/process-detector-macos.md`,
 #: never from reading the code.** Windows is not listed here: its adapter is
 #: what the project has always shipped and what CI exercises.
