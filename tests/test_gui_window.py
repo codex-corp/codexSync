@@ -2006,7 +2006,12 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertNotIsInstance(window.screen("about"), NoConfigScreen)
         self.assertEqual(window.statusBar().currentMessage(), window.catalog.text("statusbar.no_config"))
         first_run = window.screen("first_run")
-        self.assertEqual(first_run.config_path.text(), "", "no location is proposed")
+        from codexsync.config_locations import suggested_new_config_path
+        suggested = suggested_new_config_path()
+        self.assertEqual(
+            first_run.config_path.text(),
+            "" if suggested is None else str(suggested),
+        )
         self.assertNotIn("AppData", first_run.banner.detail.text())
 
     def test_a_placeholder_page_opens_an_existing_config_anywhere(self) -> None:
