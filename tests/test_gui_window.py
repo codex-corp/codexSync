@@ -2083,13 +2083,14 @@ class ConfigScreensTests(_WindowTestCase):
         window, _ = self.make(controller=Controller(None))
         screen = window.screen("first_run")
         screen.open_existing(codex_config)
-        self.assertTrue(screen.status.isVisible())
+        self.assertNotEqual(screen.status.text(), "")
+        self.assertFalse(screen.status.isHidden())
 
         screen.config_path.setText(str(self.root / "codexsync-config.toml"))
 
         self.assertIsNone(screen.model.result)
         self.assertEqual(screen.status.text(), "")
-        self.assertFalse(screen.status.isVisible())
+        self.assertTrue(screen.status.isHidden())
 
     def test_opening_a_config_shows_what_it_says_and_stays_on_the_page(self) -> None:
         """The machine name came from the host name and stayed there after an open."""
