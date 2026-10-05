@@ -2043,6 +2043,20 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertEqual(window.controller.config_path, path)
         self.assertEqual(window.machine_id(), "laptop")
 
+    def test_open_existing_button_does_not_treat_qt_checked_state_as_a_path(self) -> None:
+        path = self._create()
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+
+        with mock.patch(
+            "codexsync.gui.screens.first_run.QFileDialog.getOpenFileName",
+            return_value=(str(path), "TOML (*.toml)"),
+        ):
+            screen.open_button.click()
+
+        self.assertEqual(window.controller.config_path, path)
+        self.assertEqual(window.machine_id(), "laptop")
+
     def test_picking_codex_own_config_is_refused_without_switching(self) -> None:
         codex_config = self.root / "codex" / "config.toml"
         codex_config.write_text(
