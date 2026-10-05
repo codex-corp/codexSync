@@ -56,6 +56,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install Ubuntu GUI system dependencies
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
