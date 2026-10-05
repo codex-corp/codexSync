@@ -229,9 +229,13 @@ class FirstRunScreen(Screen):
             if not chosen:
                 return
             path = Path(chosen)
-        # The window stays here: the form now shows what the file says, which
-        # is the proof it was read; jumping away would hide exactly that.
-        self.host.open_config(Path(path))
+        # Validate before switching. Codex itself owns `.codex/config.toml`,
+        # so an existing TOML file is not evidence that it belongs to CodexSync.
+        outcome = self.host.open_config(Path(path))
+        if not outcome.ok:
+            self.model.result = outcome
+            self.model.result_is_prompt = False
+            self.render()
 
     def create(self) -> None:
         model = self.model
