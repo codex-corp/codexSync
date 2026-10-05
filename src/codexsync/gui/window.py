@@ -456,9 +456,20 @@ class MainWindow(QMainWindow):
         if self._remember is not None and self._controller.config_exists():
             self._remember(self._controller.config_path)
 
-    def open_config(self, path: Path) -> None:
-        """Switch the whole window to another existing config file."""
-        self.config_changed(Path(path))
+    def open_config(self, path: Path) -> Outcome:
+        """Switch only after the selected file proves it is a CodexSync config."""
+        candidate = Controller(Path(path))
+        outcome = candidate.validate_config_candidate()
+        if not outcome.ok:
+            return outcome
+        self._controller = candidate
+        self._config_choice = None
+        self._models = {page: SCREENS[page][1]() for page in PAGES}
+        self._remember_config()
+        self._load_config_info()
+        self._build(self._stack.currentIndex())
+        self._check_config()
+        return outcome
 
     def _remembered_size(self) -> tuple[int, int]:
         """The size to open at: what was kept, never smaller than the minimum.
