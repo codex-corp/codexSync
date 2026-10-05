@@ -2074,6 +2074,23 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertFalse(screen.model.result.ok)
         self.assertIn("paths.cloud_root_dir", screen.model.result.message)
 
+    def test_changing_first_run_inputs_clears_a_stale_open_error(self) -> None:
+        codex_config = self.root / "codex" / "config.toml"
+        codex_config.write_text(
+            '[model_providers.openai]\nname = "OpenAI"\n',
+            encoding="utf-8",
+        )
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+        screen.open_existing(codex_config)
+        self.assertTrue(screen.status.isVisible())
+
+        screen.config_path.setText(str(self.root / "codexsync-config.toml"))
+
+        self.assertIsNone(screen.model.result)
+        self.assertEqual(screen.status.text(), "")
+        self.assertFalse(screen.status.isVisible())
+
     def test_opening_a_config_shows_what_it_says_and_stays_on_the_page(self) -> None:
         """The machine name came from the host name and stayed there after an open."""
         from codexsync.gui.window import PAGES
