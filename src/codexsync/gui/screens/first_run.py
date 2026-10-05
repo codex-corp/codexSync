@@ -6,11 +6,14 @@ same loader the command line uses. It does not create, touch or even look inside
 the Codex state directory, and it does not create the workspace folders: those
 appear when an operation that needs them runs.
 
-Where the file goes is the user's to say. The field starts empty -- an earlier
-version proposed a per-user path under %APPDATA% and the rest of the window
-then worked against that path although nobody had created it (CS-268). A path
-that names a file which already exists is a request to *use* that file, so the
-button turns into "open this file" rather than refusing or overwriting it.
+Where the file goes is the user's to say. On maintained Ubuntu releases the
+field suggests the local application config path, but that suggestion is never
+opened or created until the user explicitly chooses to do so. Other platforms
+keep the existing empty first-run field. An earlier version silently adopted a
+per-user path under %APPDATA% and the rest of the window then worked against
+that path although nobody had created or chosen it (CS-268). A path that names
+a file which already exists is a request to *use* that file, so the button turns
+into "open this file" rather than refusing or overwriting it.
 
 A machine name is permanent in practice. Backups, Guardian snapshots and
 session plans are all filed under it, and `[[path_mappings]]` rules on the
