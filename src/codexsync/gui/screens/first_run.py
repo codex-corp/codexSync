@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ...config_locations import suggested_new_config_path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog, QFormLayout, QHBoxLayout, QLineEdit
 
@@ -75,7 +76,8 @@ class FirstRunScreen(Screen):
         # A path is only ever set without a file when it was named with `-c`,
         # which is a request to create it there; otherwise the field is empty.
         named = controller.config_path
-        opened = str(named.resolve()) if named is not None else ""
+        suggested = suggested_new_config_path()
+        opened = str(named.resolve()) if named is not None else (str(suggested) if suggested is not None else "")
         # An open file speaks for itself: the form shows what it says, never
         # this computer's host name or a guessed `.codex` beside it.
         loaded = self._loaded_values()
