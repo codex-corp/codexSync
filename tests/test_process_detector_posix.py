@@ -156,7 +156,7 @@ class LinuxMatchingTests(unittest.TestCase):
 
     def test_a_shared_runtime_is_never_matched_by_name(self) -> None:
         self.assertEqual(_match_posix(self.listing, ["node", "bwrap"]), [
-            proc for proc in self.listing if proc.pid in (904, 905)
+            proc for proc in self.listing if proc.pid in (904, 905, 906)
         ], "these names are matchable, which is exactly why the template does not list them")
 
     def test_the_install_path_marker_finds_the_helpers(self) -> None:
